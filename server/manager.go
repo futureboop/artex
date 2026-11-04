@@ -1722,27 +1722,36 @@ func (m *Manager) ResolveTask(id string) *Task {
 }
 
 func (m *Manager) List() []*Task {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	out := make([]*Task, 0, len(m.tasks))
-	for _, t := range m.tasks {
-		out = append(out, t)
+	type taskSortKey struct {
+		task     *Task
+		pinnedAt int64
+		id       int64
 	}
+	m.mu.RLock()
+	keys := make([]taskSortKey, 0, len(m.tasks))
+	for _, t := range m.tasks {
+		t.lifecycleMu.RLock()
+		pinnedAt := t.PinnedAt
+		t.lifecycleMu.RUnlock()
+		id, _ := strconv.ParseInt(t.ID, 10, 64)
+		keys = append(keys, taskSortKey{task: t, pinnedAt: pinnedAt, id: id})
+	}
+	m.mu.RUnlock()
 	// 置顶任务优先，组内按置顶时间倒序；普通任务按 id 倒序。m.tasks 是 map，
-	// 每次轮询都必须重排，id 则为同刻创建任务提供稳定且唯一的兜底顺序。
-	sort.Slice(out, func(i, j int) bool {
-		iState := out[i].lifecycleSnapshot()
-		jState := out[j].lifecycleSnapshot()
-		if (iState.PinnedAt > 0) != (jState.PinnedAt > 0) {
-			return iState.PinnedAt > 0
+	// 每次轮询都必须重排；提前快照排序键，避免每次比较都复制生命周期数据。
+	sort.Slice(keys, func(i, j int) bool {
+		if (keys[i].pinnedAt > 0) != (keys[j].pinnedAt > 0) {
+			return keys[i].pinnedAt > 0
 		}
-		if iState.PinnedAt != jState.PinnedAt {
-			return iState.PinnedAt > jState.PinnedAt
+		if keys[i].pinnedAt != keys[j].pinnedAt {
+			return keys[i].pinnedAt > keys[j].pinnedAt
 		}
-		ai, _ := strconv.ParseInt(out[i].ID, 10, 64)
-		aj, _ := strconv.ParseInt(out[j].ID, 10, 64)
-		return ai > aj
+		return keys[i].id > keys[j].id
 	})
+	out := make([]*Task, len(keys))
+	for i := range keys {
+		out[i] = keys[i].task
+	}
 	return out
 }
 

@@ -651,7 +651,7 @@ func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	s.registerSideRoutes(mux)
 
-	// Auth routes — exempt from JWT check (handled in requireAuth)
+	// Public auth routes are explicitly exempted by requireAuth.
 	mux.HandleFunc("GET /api/auth/status", s.authStatus)
 	mux.HandleFunc("POST /api/auth/init", s.authInit)
 	mux.HandleFunc("POST /api/auth/login", s.authLogin)
@@ -663,8 +663,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/logs/history", s.getLogsHistory)
 	mux.HandleFunc("GET /api/logs/stream", s.streamLogs)
 
-	// 页面一键更新。走的是默认的 JWT 鉴权（auth.go 只放行 /api/auth/* 和
-	// /api/health），所以这几个改动程序自身的接口天然需要登录。
+	// 页面一键更新。走默认的 JWT 鉴权，所以这几个改动程序自身的接口需要登录。
 	mux.HandleFunc("GET /api/update/check", s.updateCheck)
 	mux.HandleFunc("POST /api/update/apply", s.updateApply)
 	mux.HandleFunc("POST /api/update/rollback", s.updateRollback)
@@ -1041,9 +1040,10 @@ func (s *Server) listTasks(w http.ResponseWriter, r *http.Request) {
 	list := s.m.List()
 	metrics, _ := s.m.PG().TaskListMetricsAll()
 	archiveBlockers, _ := s.m.PG().TaskArchiveBlockers()
+	readyForList := s.taskListReadiness()
 	dtos := make([]TaskDTO, 0, len(list))
 	for _, t := range list {
-		dto := taskDTO(t, s.resolvedTaskStatus(t))
+		dto := taskDTO(t, s.resolvedTaskStatusWithReadiness(t, readyForList))
 		applyTaskArchiveBlocker(&dto, archiveBlockers)
 		metric := metrics[t.ExpID]
 		dto.Tokens = tokenTotalDTO(metric.Tokens)
@@ -1067,7 +1067,42 @@ func (s *Server) listTasks(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]any{"tasks": dtos, "active": active})
 }
 
+// taskListReadiness resolves the two role bindings and global provider once per
+// response. A list with many started tasks otherwise repeats the same database
+// lookups for every row. Task-specific active profiles are memoized by ID.
+func (s *Server) taskListReadiness() func(*Task) bool {
+	var initialized, plannerBound, workerBound, globalReady bool
+	profileReady := make(map[int64]bool)
+	return func(t *Task) bool {
+		if !initialized {
+			_, _, plannerBound = s.agentBindingProvider("planner")
+			_, _, workerBound = s.agentBindingProvider("worker")
+			_, _, globalReady = s.globalProvider()
+			initialized = true
+		}
+		state := t.llmStateSnapshot()
+		unboundReady := globalReady
+		if len(state.ProfileIDs) > 0 {
+			unboundReady = false
+			if state.ActiveID != nil {
+				id := *state.ActiveID
+				ready, ok := profileReady[id]
+				if !ok {
+					_, _, ready = s.providerForProfile(id)
+					profileReady[id] = ready
+				}
+				unboundReady = ready
+			}
+		}
+		return (plannerBound || unboundReady) && (workerBound || unboundReady)
+	}
+}
+
 func (s *Server) resolvedTaskStatus(t *Task) string {
+	return s.resolvedTaskStatusWithReadiness(t, s.engine.ReadyFor)
+}
+
+func (s *Server) resolvedTaskStatusWithReadiness(t *Task, ready func(*Task) bool) string {
 	if t == nil {
 		return "created"
 	}
@@ -1083,7 +1118,7 @@ func (s *Server) resolvedTaskStatus(t *Task) string {
 		// LLM readiness is an execution dependency, not lifecycle state. Keeping
 		// an exhausted task running lets the user edit/reset its chain directly.
 		return "running"
-	case s.engine.ReadyFor(t) && s.engine.Started(t.ID):
+	case s.engine.Started(t.ID) && ready(t):
 		return "running"
 	default:
 		return "created"

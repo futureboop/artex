@@ -25,12 +25,28 @@ var (
 const findingEvidenceLockKey int64 = 7337741004
 
 func (d *DB) WithEvidenceTx(ctx context.Context, fn func(*sql.Tx) error) error {
+	return d.withEvidenceTx(ctx, false, fn)
+}
+
+// WithConcurrentFindingTx permits independent findings without traffic bodies to
+// proceed together. The shared lock still excludes evidence GC, exports and all
+// other operations that require the exclusive evidence lock. Callbacks must not
+// read or write evidence files or acquire another evidence advisory lock.
+func (d *DB) WithConcurrentFindingTx(ctx context.Context, fn func(*sql.Tx) error) error {
+	return d.withEvidenceTx(ctx, true, fn)
+}
+
+func (d *DB) withEvidenceTx(ctx context.Context, concurrent bool, fn func(*sql.Tx) error) error {
 	tx, err := d.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
-	if _, err = tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock($1)`, findingEvidenceLockKey); err != nil {
+	lockSQL := `SELECT pg_advisory_xact_lock($1)`
+	if concurrent {
+		lockSQL = `SELECT pg_advisory_xact_lock_shared($1)`
+	}
+	if _, err = tx.ExecContext(ctx, lockSQL, findingEvidenceLockKey); err != nil {
 		return err
 	}
 	if err = fn(tx); err != nil {
@@ -410,7 +426,7 @@ VALUES(NULLIF($1,0),$2,$3,$4,$5,$6,$7,$8,$9) RETURNING id`, in.TaskID, out.NodeI
 // RecordFinding is the atomic legacy/no-recorder path used by tools and tests.
 func (s *ExplorationStore) RecordFinding(ctx context.Context, in RecordFindingInput) (out *RecordedFinding, err error) {
 	in.ExplorationID = s.expID
-	err = s.db.WithEvidenceTx(ctx, func(tx *sql.Tx) error { var e error; out, e = RecordFindingTx(ctx, tx, in, nil); return e })
+	err = s.db.WithConcurrentFindingTx(ctx, func(tx *sql.Tx) error { var e error; out, e = RecordFindingTx(ctx, tx, in, nil); return e })
 	return
 }
 

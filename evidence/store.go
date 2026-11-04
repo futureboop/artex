@@ -180,7 +180,11 @@ func (s *Store) prepare(ctx context.Context, refs []db.TrafficRef) ([]db.Prepare
 }
 
 func (s *Store) Record(ctx context.Context, in db.RecordFindingInput, refs []db.TrafficRef) (out *db.RecordedFinding, err error) {
-	err = s.DB.WithEvidenceTx(ctx, func(tx *sql.Tx) error {
+	withTx := s.DB.WithEvidenceTx
+	if len(refs) == 0 {
+		withTx = s.DB.WithConcurrentFindingTx
+	}
+	err = withTx(ctx, func(tx *sql.Tx) error {
 		if err := db.LockTaskEvidenceTx(tx, in.TaskID); err != nil {
 			return err
 		}

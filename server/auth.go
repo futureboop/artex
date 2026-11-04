@@ -6,6 +6,7 @@ import (
 	"log"
 	"math/big"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -94,12 +95,12 @@ func signJWT(key []byte) (string, error) {
 
 // verifyJWT returns true when tokenStr is a valid, non-expired HS256 token.
 func verifyJWT(tokenStr string, key []byte) bool {
+	if len(key) == 0 {
+		return false
+	}
 	t, err := jwt.Parse(tokenStr, func(t *jwt.Token) (any, error) {
-		if _, ok := t.Method.(*jwt.SigningMethodHMAC); !ok {
-			return nil, fmt.Errorf("unexpected signing method")
-		}
 		return key, nil
-	})
+	}, jwt.WithValidMethods([]string{"HS256"}), jwt.WithExpirationRequired(), jwt.WithSubject("ARTEX"))
 	return err == nil && t.Valid
 }
 
@@ -115,16 +116,56 @@ func extractToken(r *http.Request) string {
 	return r.URL.Query().Get("token")
 }
 
+// Browsers send Origin (and usually Sec-Fetch-Site) on writes. A cookie may
+// authenticate a write from this UI, but another origin must not be able to
+// borrow that cookie to run a command or change server state. Compare Host,
+// including its port; TLS may terminate before the request reaches this server.
+func cookieMutationOriginAllowed(r *http.Request) bool {
+	switch r.Header.Get("Sec-Fetch-Site") {
+	case "", "same-origin", "none":
+	default:
+		return false
+	}
+	sameHost := func(raw string, origin bool) bool {
+		u, err := url.Parse(raw)
+		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" || u.User != nil || !strings.EqualFold(u.Host, r.Host) {
+			return false
+		}
+		return !origin || (u.Path == "" && u.RawQuery == "" && u.Fragment == "")
+	}
+	if origins, present := r.Header["Origin"]; present {
+		return len(origins) == 1 && sameHost(origins[0], true)
+	}
+	if referer := r.Referer(); referer != "" {
+		return sameHost(referer, false)
+	}
+	return true
+}
+
 // requireAuth wraps h with JWT validation.
-// /api/auth/* and /api/health are exempt.
+// Only the exact public login, initialization, status and health routes are exempt.
 func (s *Server) requireAuth(h http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		p := r.URL.Path
-		if strings.HasPrefix(p, "/api/auth/") || p == "/api/health" {
+		p := r.URL.EscapedPath()
+		publicGet := (r.Method == http.MethodGet || r.Method == http.MethodHead) &&
+			(p == "/api/auth/status" || p == "/api/health")
+		publicPost := r.Method == http.MethodPost && (p == "/api/auth/init" || p == "/api/auth/login")
+		if publicGet || publicPost {
 			h.ServeHTTP(w, r)
 			return
 		}
-		tok := extractToken(r)
+		var tok string
+		if r.Method == http.MethodGet || r.Method == http.MethodHead {
+			tok = extractToken(r)
+		} else if h := r.Header.Get("Authorization"); strings.HasPrefix(h, "Bearer ") {
+			tok = strings.TrimPrefix(h, "Bearer ")
+		} else if c, err := r.Cookie("artex_token"); err == nil && c.Value != "" {
+			if !cookieMutationOriginAllowed(r) {
+				writeErr(w, http.StatusForbidden, "跨来源 Cookie 请求被拒绝")
+				return
+			}
+			tok = c.Value
+		}
 		if tok == "" {
 			writeErr(w, 401, "未授权")
 			return
@@ -206,8 +247,8 @@ func (s *Server) authInit(w http.ResponseWriter, r *http.Request) {
 }
 
 // POST /api/auth/change-password — changes the admin password. Requires a valid
-// token (this route is under /api/auth/* which requireAuth exempts, so the token
-// is validated here) AND the current password.
+// token AND the current password. The handler also validates the token itself
+// so direct invocations are protected.
 func (s *Server) authChangePassword(w http.ResponseWriter, r *http.Request) {
 	pg := s.pg(w)
 	if pg == nil {

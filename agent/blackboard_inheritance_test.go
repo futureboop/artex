@@ -82,27 +82,12 @@ func TestGraphOverviewExpandsAssociatedCompanyScope(t *testing.T) {
 	if !ok {
 		t.Fatalf("coverage missing: %#v", overview["coverage"])
 	}
-	scopeRows, ok := coverage["scope"].([]map[string]any)
-	if !ok || len(scopeRows) != 1 {
-		t.Fatalf("task scope missing: %#v", coverage["scope"])
+	// graph_overview deliberately omits the full scope to keep planner context
+	// bounded. The same company scope must remain available through the read tool.
+	if _, exists := coverage["scope"]; exists {
+		t.Fatalf("graph overview unexpectedly inlined company scope: %#v", coverage["scope"])
 	}
-	companyScope, ok := scopeRows[0]["company_scope"].([]map[string]any)
-	if !ok || len(companyScope) != len(inputs) {
-		t.Fatalf("company scope not expanded: %#v", scopeRows[0])
-	}
-	kinds := make(map[string]string, len(companyScope))
-	for _, rule := range companyScope {
-		kinds[fmt.Sprint(rule["kind"])] = fmt.Sprint(rule["value"])
-	}
-	for _, input := range inputs {
-		if kinds[input.Kind] != input.Value {
-			t.Errorf("scope %s=%q want %q", input.Kind, kinds[input.Kind], input.Value)
-		}
-	}
-	keywords, ok := scopeRows[0]["company_keywords"].([]string)
-	if !ok || len(keywords) != 1 || keywords[0] != keyword {
-		t.Fatalf("company keywords missing: %#v", scopeRows[0]["company_keywords"])
-	}
+	assertCompanyScopeTool(t, tools.listCompanies(), companiesName(t, companies, companyID), companyID, inputs)
 	if hc, _ := coverage["host_count"].(int); hc < 1 {
 		t.Fatalf("company asset host not counted in agent context: %#v", coverage["host_count"])
 	}
@@ -147,6 +132,7 @@ func TestGraphOverviewExpandsAssociatedCompanyScope(t *testing.T) {
 	disabledTools.SetTaskID(disabledTask.ID)
 	disabledTools.SetCoverageEnabled(false)
 	disabledTools.SetAssetStore(assets, companies)
+	assertCompanyScopeTool(t, disabledTools.listCompanies(), companiesName(t, companies, companyID), companyID, inputs)
 	disabledOverview := disabledTools.graphOverviewData()
 	disabledCoverage, ok := disabledOverview["coverage"].(map[string]any)
 	if !ok {
@@ -181,6 +167,45 @@ func companiesName(t *testing.T, companies *db.CompanyStore, companyID int64) st
 		t.Fatalf("company %d: company=%+v err=%v", companyID, company, err)
 	}
 	return company.Name
+}
+
+func assertCompanyScopeTool(t *testing.T, tool actool.CoreTool, name string, companyID int64, inputs []db.ScopeInput) {
+	t.Helper()
+	result, err := tool.Call(context.Background(), json.RawMessage(fmt.Sprintf(`{"search":%q}`, name)), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out struct {
+		Count     int `json:"count"`
+		Companies []struct {
+			ID         int64    `json:"id"`
+			Name       string   `json:"name"`
+			AssetCount int      `json:"asset_count"`
+			Scope      []string `json:"scope"`
+		} `json:"companies"`
+	}
+	if err := json.Unmarshal([]byte(result.Flatten()), &out); err != nil {
+		t.Fatalf("decode list_companies: %v; raw=%s", err, result.Flatten())
+	}
+	if out.Count != 1 || len(out.Companies) != 1 || out.Companies[0].ID != companyID || out.Companies[0].Name != name || out.Companies[0].AssetCount < 1 {
+		t.Fatalf("company missing from list_companies: %+v", out)
+	}
+	scope := out.Companies[0].Scope
+	if len(scope) != len(inputs) {
+		t.Fatalf("company scope=%v, want %d entries", scope, len(inputs))
+	}
+	for _, input := range inputs {
+		found := false
+		for _, value := range scope {
+			if value == input.Value {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("company scope missing %s=%q: %v", input.Kind, input.Value, scope)
+		}
+	}
 }
 
 func TestBlackboardToolsReadDirectSources(t *testing.T) {

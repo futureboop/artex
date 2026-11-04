@@ -2,10 +2,168 @@ package server
 
 import (
 	"encoding/json"
+	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/golang-jwt/jwt/v5"
 )
+
+func TestAuthenticationBoundary(t *testing.T) {
+	key := []byte("test-only-key-for-auth-boundary")
+	s := &Server{jwtKey: key}
+	token, err := signJWT(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler := s.requireAuth(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	for _, tc := range []struct {
+		method, path, token string
+		want                int
+	}{
+		{"GET", "/api/health", "", 204},
+		{"GET", "/api/auth/status", "", 204},
+		{"POST", "/api/auth/login", "", 204},
+		{"POST", "/api/auth/init", "", 204},
+		{"GET", "/api/tasks", "", 401},
+		{"GET", "/api/llm/profiles", "", 401},
+		{"GET", "/api/settings", "", 401},
+		{"GET", "/api/auth/future-sensitive-endpoint", "", 401},
+		{"GET", "/api/auth/status/extra", "", 401},
+		{"GET", "/api/auth/%73tatus", "", 401},
+		{"GET", "/api/auth/../tasks", "", 401},
+		{"POST", "/api/auth/status", "", 401},
+		{"POST", "/api/auth/change-password", "", 401},
+		{"GET", "/api/tasks", "invalid", 401},
+		{"GET", "/api/tasks", token, 204},
+	} {
+		t.Run(tc.method+" "+tc.path, func(t *testing.T) {
+			r := httptest.NewRequest(tc.method, tc.path, nil)
+			if tc.token != "" {
+				r.Header.Set("Authorization", "Bearer "+tc.token)
+			}
+			w := httptest.NewRecorder()
+			handler.ServeHTTP(w, r)
+			if w.Code != tc.want {
+				t.Fatalf("status=%d, want %d", w.Code, tc.want)
+			}
+		})
+	}
+	for _, source := range []string{"cookie", "query"} {
+		t.Run(source, func(t *testing.T) {
+			path := "/api/tasks"
+			if source == "query" {
+				path += "?token=" + token
+			}
+			r := httptest.NewRequest(http.MethodGet, path, nil)
+			if source == "cookie" {
+				r.AddCookie(&http.Cookie{Name: "artex_token", Value: token})
+			}
+			w := httptest.NewRecorder()
+			handler.ServeHTTP(w, r)
+			if w.Code != http.StatusNoContent {
+				t.Fatalf("status=%d, want %d", w.Code, http.StatusNoContent)
+			}
+		})
+	}
+	for _, tc := range []struct {
+		name, origin, referer, fetchSite string
+		cookie, query                    bool
+		want                             int
+	}{
+		{"same-origin cookie", "http://example.com", "", "same-origin", true, false, 204},
+		{"cookie without browser headers", "", "", "", true, false, 204},
+		{"same-origin referer", "", "http://example.com/tools", "", true, false, 204},
+		{"different port", "http://example.com:8788", "", "", true, false, 403},
+		{"different host", "https://untrusted.example.test", "", "cross-site", true, false, 403},
+		{"null origin", "null", "", "", true, false, 403},
+		{"different referer", "", "http://untrusted.example.test/tools", "", true, false, 403},
+		{"same-site fetch metadata", "", "", "same-site", true, false, 403},
+		{"query only", "", "", "", false, true, 401},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := "/api/tools/custom/test"
+			if tc.query {
+				path += "?token=" + token
+			}
+			r := httptest.NewRequest(http.MethodPost, path, strings.NewReader(`{"kind":"script"}`))
+			if tc.origin != "" {
+				r.Header.Set("Origin", tc.origin)
+			}
+			if tc.referer != "" {
+				r.Header.Set("Referer", tc.referer)
+			}
+			if tc.fetchSite != "" {
+				r.Header.Set("Sec-Fetch-Site", tc.fetchSite)
+			}
+			if tc.cookie {
+				r.AddCookie(&http.Cookie{Name: "artex_token", Value: token})
+			}
+			w := httptest.NewRecorder()
+			handler.ServeHTTP(w, r)
+			if w.Code != tc.want {
+				t.Fatalf("cookie mutation status=%d, want %d", w.Code, tc.want)
+			}
+		})
+	}
+	t.Run("mutation_with_bearer", func(t *testing.T) {
+		r := httptest.NewRequest(http.MethodPost, "/api/tools/custom/test", nil)
+		r.Header.Set("Authorization", "Bearer "+token)
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, r)
+		if w.Code != http.StatusNoContent {
+			t.Fatalf("bearer mutation status=%d, want 204", w.Code)
+		}
+	})
+}
+
+func TestHandlerRejectsAnonymousSensitiveRoutes(t *testing.T) {
+	s := &Server{jwtKey: []byte("test-only-key-for-auth-boundary")}
+	h := s.Handler()
+	for _, path := range []string{
+		"/api/tasks", "/api/tasks/1", "/api/settings", "/api/llm/profiles",
+		"/api/llm/records", "/api/workspace/read?path=jwt.key",
+		"/api/auth%2ffuture-sensitive-endpoint", "/api/auth/%2e%2e/tasks",
+	} {
+		t.Run(path, func(t *testing.T) {
+			w := httptest.NewRecorder()
+			h.ServeHTTP(w, httptest.NewRequest(http.MethodGet, path, nil))
+			if w.Code != http.StatusUnauthorized && w.Code != http.StatusMovedPermanently {
+				t.Fatalf("anonymous request status=%d, body=%s", w.Code, w.Body.String())
+			}
+		})
+	}
+}
+
+func TestVerifyJWTRequiresExpectedClaimsAndAlgorithm(t *testing.T) {
+	key := []byte("test-only-key-for-auth-boundary")
+	for _, tc := range []struct {
+		name   string
+		method jwt.SigningMethod
+		claims jwt.MapClaims
+		want   bool
+	}{
+		{"valid", jwt.SigningMethodHS256, jwt.MapClaims{"sub": "ARTEX", "exp": time.Now().Add(time.Hour).Unix()}, true},
+		{"no expiry", jwt.SigningMethodHS256, jwt.MapClaims{"sub": "ARTEX"}, false},
+		{"expired", jwt.SigningMethodHS256, jwt.MapClaims{"sub": "ARTEX", "exp": time.Now().Add(-time.Hour).Unix()}, false},
+		{"wrong subject", jwt.SigningMethodHS256, jwt.MapClaims{"sub": "other", "exp": time.Now().Add(time.Hour).Unix()}, false},
+		{"wrong algorithm", jwt.SigningMethodHS384, jwt.MapClaims{"sub": "ARTEX", "exp": time.Now().Add(time.Hour).Unix()}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			token, err := jwt.NewWithClaims(tc.method, tc.claims).SignedString(key)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := verifyJWT(token, key); got != tc.want {
+				t.Fatalf("verifyJWT() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
 
 // GetSetting 对"键不存在"和"读取出错"的返回值只差一个 error：两种情况 value 都是
 // 空串。密码相关的 handler 一旦把 error 当成"还没设置密码"，就会在数据库抖动期间
