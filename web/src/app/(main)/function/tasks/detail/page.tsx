@@ -2,6 +2,7 @@
 
 import * as React from "react";
 
+import dynamic from "next/dynamic";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 
@@ -39,16 +40,18 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip
 import { api } from "@/lib/api";
 import type { LLMProfile, Task } from "@/lib/types";
 
-import { AssetsTab } from "./_tabs/assets-tab";
-import { BroadcastTab } from "./_tabs/broadcast-tab";
-import { CoverageGraphTab } from "./_tabs/coverage-graph-tab";
-import { FindingsTab } from "./_tabs/findings-tab";
-import { GraphTab } from "./_tabs/graph-tab";
-import { InterceptTab } from "./_tabs/intercept-tab";
-import { OverviewTab } from "./_tabs/overview-tab";
-import { ReportTab } from "./_tabs/report-tab";
-import { RetestsTab } from "./_tabs/retests-tab";
-import { SessionsTab } from "./_tabs/sessions-tab";
+// Only the selected tab is loaded. Graphs, transcripts and reports each pull in
+// large libraries; bundling all ten made every task visit pay for all of them.
+const AssetsTab = dynamic(() => import("./_tabs/assets-tab").then((m) => m.AssetsTab));
+const BroadcastTab = dynamic(() => import("./_tabs/broadcast-tab").then((m) => m.BroadcastTab));
+const CoverageGraphTab = dynamic(() => import("./_tabs/coverage-graph-tab").then((m) => m.CoverageGraphTab));
+const FindingsTab = dynamic(() => import("./_tabs/findings-tab").then((m) => m.FindingsTab));
+const GraphTab = dynamic(() => import("./_tabs/graph-tab").then((m) => m.GraphTab));
+const InterceptTab = dynamic(() => import("./_tabs/intercept-tab").then((m) => m.InterceptTab));
+const OverviewTab = dynamic(() => import("./_tabs/overview-tab").then((m) => m.OverviewTab));
+const ReportTab = dynamic(() => import("./_tabs/report-tab").then((m) => m.ReportTab));
+const RetestsTab = dynamic(() => import("./_tabs/retests-tab").then((m) => m.RetestsTab));
+const SessionsTab = dynamic(() => import("./_tabs/sessions-tab").then((m) => m.SessionsTab));
 
 const TABS = [
   { value: "sessions", label: "会话" },
@@ -244,30 +247,47 @@ function TaskDetailInner() {
   const load = React.useCallback(() => {
     if (taskLoadInFlight.current === id) return;
     taskLoadInFlight.current = id;
-    Promise.all([api.task(id), api.stats(id).catch(() => null)])
-      .then(([task, s]) => {
+    const taskRequest = api
+      .task(id)
+      .then((task) => {
         if (taskLoadInFlight.current !== id) return;
-        const base = { ...task };
-        const at = s?.active_task;
-        if (at) {
-          base.in_flight = at.in_flight;
-          base.goals_total = at.goals_total;
-          base.goals_met = at.goals_met;
-          base.engine_mode = s?.engine_mode ?? at.engine_mode;
-          base.paused = at.paused;
-        }
-        setTask(base);
-        setPaused(at?.paused ?? base.paused ?? false);
+        setTask(task);
+        setPaused(task.paused ?? false);
+        setLoaded(true);
       })
       .catch(() => {
         // Keep the last rendered task state during a transient poll failure.
-      })
-      .finally(() => {
-        if (taskLoadInFlight.current === id) {
-          taskLoadInFlight.current = null;
-          setLoaded(true);
-        }
       });
+    // Stats can be slower than the task record. Let the page render as soon as
+    // the task arrives, then enrich the live status without blocking navigation.
+    const statsRequest = api
+      .stats(id)
+      .then((s) => {
+        if (taskLoadInFlight.current !== id || !s.active_task) return;
+        const at = s.active_task;
+        setTask((current) =>
+          current?.id === id
+            ? {
+                ...current,
+                in_flight: at.in_flight,
+                goals_total: at.goals_total,
+                goals_met: at.goals_met,
+                engine_mode: s.engine_mode ?? at.engine_mode,
+                paused: at.paused,
+              }
+            : current,
+        );
+        setPaused(at.paused ?? false);
+      })
+      .catch(() => {
+        // Task details remain usable when live stats fail.
+      });
+    void Promise.allSettled([taskRequest, statsRequest]).then(() => {
+      if (taskLoadInFlight.current === id) {
+        taskLoadInFlight.current = null;
+        setLoaded(true);
+      }
+    });
   }, [id]);
   React.useEffect(() => {
     load();
