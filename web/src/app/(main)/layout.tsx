@@ -3,101 +3,44 @@
 import type { ReactNode } from "react";
 import * as React from "react";
 
-import { AppSidebar } from "@/app/(main)/_components/sidebar/app-sidebar";
-import { SidebarInset, SidebarProvider } from "@/components/ui/sidebar";
+import dynamic from "next/dynamic";
+
 import { auth } from "@/lib/auth";
-import { getClientCookie } from "@/lib/cookie.client";
-import {
-  SIDEBAR_COLLAPSIBLE_VALUES,
-  SIDEBAR_VARIANT_VALUES,
-  type SidebarCollapsible,
-  type SidebarVariant,
-} from "@/lib/preferences/layout";
-import { PREFERENCE_DEFAULTS } from "@/lib/preferences/preferences-config";
-import { cn } from "@/lib/utils";
 
-import { MainContent } from "./_components/main-content";
-
-// Reads a layout-critical preference from the browser cookie (falls back to the
-// default during static-export prerender where document is unavailable). Kept
-// fully client-side so the app can be statically exported — no Server Actions /
-// next/headers.
-function readPref<T extends string>(key: string, allowed: readonly T[], fallback: T): T {
-  if (typeof document === "undefined") return fallback;
-  const value = getClientCookie(key);
-  return value && (allowed as readonly string[]).includes(value) ? (value as T) : fallback;
+function StartupStatus({ message }: { message: string }) {
+  return (
+    <main className="flex min-h-dvh items-center justify-center bg-background px-6 text-foreground" role="status">
+      <div className="flex w-full max-w-xs flex-col items-center gap-4 text-center">
+        <img src="/logo.png" alt="ARTEX" width={48} height={48} />
+        <div className="space-y-1">
+          <p className="font-semibold">正在打开控制台</p>
+          <p className="text-sm text-muted-foreground">{message}</p>
+        </div>
+        <div className="h-1 w-32 overflow-hidden rounded-full bg-muted">
+          <div className="h-full w-1/2 animate-pulse rounded-full bg-primary" />
+        </div>
+      </div>
+    </main>
+  );
 }
 
+// Keep the token check independent of navigation, toolbars and page code.
+const AuthenticatedShell = dynamic(
+  () => import("./_components/authenticated-shell").then((m) => m.AuthenticatedShell),
+  { loading: () => <StartupStatus message="正在载入界面…" /> },
+);
+
 export default function Layout({ children }: Readonly<{ children: ReactNode }>) {
-  // Client-side auth gate — replaces the Next proxy/middleware that static export
-  // disables. No token → bounce to /login; show a public loading state until
-  // confirmed so protected UI (or its API calls) never flashes to visitors.
   const [authed, setAuthed] = React.useState(false);
   React.useEffect(() => {
     if (auth.getToken()) {
       setAuthed(true);
     } else {
-      // 客户端守卫认为未登录时，必须同时清掉 cookie：否则 proxy.ts 仅凭
-      // “cookie 存在”就把我们从 /login 又重定向回主界面，与本守卫来回弹跳
-      // 形成无限重定向 → 白屏（cookie 与 localStorage 不一致时触发）。
       auth.clearToken();
       window.location.href = "/login";
     }
   }, []);
 
-  const defaultOpen = typeof document === "undefined" ? true : getClientCookie("sidebar_state") !== "false";
-  const variant = readPref<SidebarVariant>(
-    "sidebar_variant",
-    SIDEBAR_VARIANT_VALUES,
-    PREFERENCE_DEFAULTS.sidebar_variant,
-  );
-  const collapsible = readPref<SidebarCollapsible>(
-    "sidebar_collapsible",
-    SIDEBAR_COLLAPSIBLE_VALUES,
-    PREFERENCE_DEFAULTS.sidebar_collapsible,
-  );
-
-  // Static export cannot read browser credentials while rendering HTML. Keep a
-  // useful first paint until hydration checks the token instead of a white page.
-  if (!authed) {
-    return (
-      <main className="flex min-h-dvh items-center justify-center bg-background px-6 text-foreground" role="status">
-        <div className="flex w-full max-w-xs flex-col items-center gap-4 text-center">
-          <img src="/logo.png" alt="ARTEX" width={48} height={48} />
-          <div className="space-y-1">
-            <p className="font-semibold">正在打开控制台</p>
-            <p className="text-sm text-muted-foreground">正在检查登录状态…</p>
-          </div>
-          <div className="h-1 w-32 overflow-hidden rounded-full bg-muted">
-            <div className="h-full w-1/2 animate-pulse rounded-full bg-primary" />
-          </div>
-        </div>
-      </main>
-    );
-  }
-
-  return (
-    <SidebarProvider
-      defaultOpen={defaultOpen}
-      style={
-        {
-          "--sidebar-width": "calc(var(--spacing) * 68)",
-        } as React.CSSProperties
-      }
-    >
-      <AppSidebar variant={variant} collapsible={collapsible} />
-      <SidebarInset
-        className={cn(
-          "[html[data-content-layout=centered]_&>*]:mx-auto",
-          "[html[data-content-layout=centered]_&>*]:w-full",
-          "[html[data-content-layout=centered]_&>*]:max-w-screen-2xl",
-          "peer-data-[variant=inset]:border",
-          "[--dashboard-header-height:--spacing(12)]",
-          "min-w-0 overflow-x-hidden",
-        )}
-      >
-        <MainContent>{children}</MainContent>
-      </SidebarInset>
-    </SidebarProvider>
-  );
+  // Static export cannot read browser credentials while rendering HTML.
+  return authed ? <AuthenticatedShell>{children}</AuthenticatedShell> : <StartupStatus message="正在检查登录状态…" />;
 }
