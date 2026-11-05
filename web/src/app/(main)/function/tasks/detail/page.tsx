@@ -209,6 +209,11 @@ function TaskDetailInner() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const id = searchParams.get("id") ?? "";
+  // The default tab is the transcript. Start fetching its code while the task
+  // record is in flight so opening a task does not serialize these waits.
+  React.useEffect(() => {
+    void import("./_tabs/sessions-tab");
+  }, []);
   const [task, setTask] = React.useState<Task | null>(null);
   const [paused, setPaused] = React.useState(false);
   const [loaded, setLoaded] = React.useState(false);
@@ -261,7 +266,7 @@ function TaskDetailInner() {
     // Stats can be slower than the task record. Let the page render as soon as
     // the task arrives, then enrich the live status without blocking navigation.
     const statsRequest = api
-      .stats(id)
+      .taskStats(id)
       .then((s) => {
         if (taskLoadInFlight.current !== id || !s.active_task) return;
         const at = s.active_task;
@@ -475,7 +480,7 @@ function TaskDetailInner() {
 // useSearchParams must sit under a Suspense boundary for static export.
 export default function TaskDetailPage() {
   return (
-    <React.Suspense fallback={null}>
+    <React.Suspense fallback={<p className="p-6 text-sm text-muted-foreground">正在打开任务…</p>}>
       <TaskDetailInner />
     </React.Suspense>
   );

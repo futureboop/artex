@@ -366,6 +366,10 @@ export const api = {
   setActive: (id: string) => post<{ active: string }>("/active", { id }),
   // ---- stats ----
   stats: (task?: string) => get<Stats>(`/stats${tq(task)}`),
+  taskStats: (task: string) =>
+    get<Pick<Stats, "engine_mode" | "active_task" | "llm_configured">>(
+      `/stats?task=${encodeURIComponent(task)}&scope=task`,
+    ),
   // 资产测试覆盖度(粗估，供参考)：范围内资产被 fact 碰过的占比 + 按类型的 总数/已测。
   taskCoverage: (id: string) =>
     get<{
@@ -739,13 +743,20 @@ export const api = {
     const q = new URLSearchParams({ session, limit: String(limit) });
     if (task) q.set("task", task);
     if (before > 0) q.set("before", String(before));
-    return get<{ items: Activity[]; snapshot_cursor: number; earliest_cursor: number; has_more: boolean }>(
-      `/exploration/activity/history?${q.toString()}`,
-    ).then((r) => ({
+    return get<{
+      items: Activity[];
+      snapshot_cursor: number;
+      earliest_cursor: number;
+      has_more: boolean;
+      main_sessions?: { seq: number; created_at: string }[];
+      current_main_seg?: number;
+    }>(`/exploration/activity/history?${q.toString()}`).then((r) => ({
       items: arr(r.items),
       snapshotCursor: r.snapshot_cursor ?? 0,
       earliestCursor: r.earliest_cursor ?? 0,
       hasMore: !!r.has_more,
+      mainSessions: r.main_sessions,
+      currentMainSeg: r.current_main_seg,
     }));
   },
   // Paged worker (intent) session list — reaches past the legacy fixed 300 cap.
@@ -825,8 +836,7 @@ export const api = {
   // 渠道是多实例资源（同一类型可配多个机器人、各有过滤规则），因此独立成组，
   // 不塞进扁平的 settings 键值里。
   notifyMeta: () => get<NotificationMeta>(`/notify/meta`),
-  notifyChannels: () =>
-    get<{ channels: NotificationChannel[] }>(`/notify/channels`).then((r) => arr(r.channels)),
+  notifyChannels: () => get<{ channels: NotificationChannel[] }>(`/notify/channels`).then((r) => arr(r.channels)),
   notifyCreateChannel: (payload: {
     name: string;
     kind: string;

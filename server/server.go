@@ -948,21 +948,24 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) stats(w http.ResponseWriter, r *http.Request) {
+	taskOnly := r.URL.Query().Get("scope") == "task"
 	out := map[string]any{}
 	out["engine_mode"] = "idle"              // spec enum; overridden below when a task is active
 	out["llm_configured"] = s.engine.Ready() // is an LLM provider installed at all
-	if tr := s.m.Traffic(); tr != nil {
-		c, _ := tr.Count()
-		out["traffic"] = c
-		out["traffic_enabled"] = true
-	}
-	if counts, err := s.m.Assets().CountsByType(); err == nil {
-		total := 0
-		for _, n := range counts {
-			total += n
+	if !taskOnly {
+		if tr := s.m.Traffic(); tr != nil {
+			c, _ := tr.Count()
+			out["traffic"] = c
+			out["traffic_enabled"] = true
 		}
-		out["assets"] = total
-		out["asset_counts"] = counts
+		if counts, err := s.m.Assets().CountsByType(); err == nil {
+			total := 0
+			for _, n := range counts {
+				total += n
+			}
+			out["assets"] = total
+			out["asset_counts"] = counts
+		}
 	}
 
 	// resolve the task: explicit ?task=<id> binds to that task (so a detail view
@@ -979,22 +982,33 @@ func (s *Server) stats(w http.ResponseWriter, r *http.Request) {
 	}
 	out["llm_configured"] = s.engine.ReadyFor(t)
 
-	st, _ := t.Store.Stats()
-	out["exploration"] = st
+	if !taskOnly {
+		st, _ := t.Store.Stats()
+		out["exploration"] = st
+	}
 
 	// per-task running state + heartbeat (distinct from "LLM configured").
-	intents, _ := t.Store.ListByKind(db.KindIntent, 100000)
-	inFlight := 0
-	for _, in := range intents {
-		if in.State == "running" {
-			inFlight++
+	inFlight, goalsTotal, goalsMet := 0, 0, 0
+	if taskOnly {
+		var err error
+		inFlight, goalsTotal, goalsMet, err = t.Store.ActiveTaskCounts()
+		if err != nil {
+			writeErr(w, 500, err.Error())
+			return
 		}
-	}
-	goals, _ := t.Store.ListByKind(db.KindGoal, 10000)
-	goalsMet := 0
-	for _, g := range goals {
-		if g.State == "met" {
-			goalsMet++
+	} else {
+		intents, _ := t.Store.ListByKind(db.KindIntent, 100000)
+		for _, in := range intents {
+			if in.State == "running" {
+				inFlight++
+			}
+		}
+		goals, _ := t.Store.ListByKind(db.KindGoal, 10000)
+		goalsTotal = len(goals)
+		for _, g := range goals {
+			if g.State == "met" {
+				goalsMet++
+			}
 		}
 	}
 	last := s.engine.LastActivity(t.ID)
@@ -1026,7 +1040,7 @@ func (s *Server) stats(w http.ResponseWriter, r *http.Request) {
 		"llm_in_flight": activeCalls,
 		"last_activity": last,
 		"stalled":       stalled,
-		"goals_total":   len(goals),
+		"goals_total":   goalsTotal,
 		"goals_met":     goalsMet,
 	}
 	writeJSON(w, 200, out)
@@ -2782,13 +2796,19 @@ func (s *Server) activityHistory(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, "bad session")
 		return
 	}
+	var mainSessions []db.MainSession
+	currentMainSeg := 0
+	var err error
 	if filter.Main && filter.MainSeg == nil { // bare "main" → the current segment
-		seg, err := t.Store.CurrentMainSeg()
+		mainSessions, err = t.Store.ListMainSessions()
 		if err != nil {
 			writeErr(w, 500, err.Error())
 			return
 		}
-		filter.MainSeg = &seg
+		if len(mainSessions) > 0 {
+			currentMainSeg = mainSessions[0].Seq
+		}
+		filter.MainSeg = &currentMainSeg
 	}
 	before := int64(atoiDefault(q.Get("before"), 0))
 	limit := min(atoiDefault(q.Get("limit"), 200), 500) // cap so one request can't pull an unbounded slice
@@ -2833,12 +2853,17 @@ func (s *Server) activityHistory(w http.ResponseWriter, r *http.Request) {
 	if len(items) > 0 {
 		earliest = items[0].ID
 	}
-	writeJSON(w, 200, map[string]any{
+	response := map[string]any{
 		"items":           activityDTOs(items),
 		"snapshot_cursor": snapshot,
 		"earliest_cursor": earliest,
 		"has_more":        hasMore,
-	})
+	}
+	if sess == "main" {
+		response["main_sessions"] = mainSessions
+		response["current_main_seg"] = currentMainSeg
+	}
+	writeJSON(w, 200, response)
 }
 
 // tokenStats returns per-worker token usage (input/output/cache read/write) for a
@@ -3756,11 +3781,7 @@ func (s *Server) chat(w http.ResponseWriter, r *http.Request) {
 	humanTurn := userActivityWithAttachments("mainagent", req.Message, req.Attachments)
 	humanTurn.MainSeg = segPtr
 	s.engine.emitActivity(t, humanTurn)
-	var ma *agent.MainAgent
 	if s.taskRuntimeAvailable(t, "mainagent") {
-		ma = s.agentsForTask(t).main
-	}
-	if ma != nil {
 		// Run the agent on a per-turn cancellable ctx (NOT r.Context()): the turn can
 		// take minutes (multi-tool loop), and binding it to the request lifecycle meant
 		// a page reload / proxy timeout cancelled it mid-run ("context canceled"). The
@@ -3770,6 +3791,16 @@ func (s *Server) chat(w http.ResponseWriter, r *http.Request) {
 			defer func() {
 				s.finishTaskChat(t.ID, cancel)
 			}()
+			if ctx.Err() != nil {
+				return
+			}
+			// Agent assembly can wait behind other task runtime work. Keep that
+			// work off the HTTP acknowledgement path; the human turn is already
+			// persisted and the per-task chat slot is reserved.
+			ma := s.agentsForTask(t).main
+			if ctx.Err() != nil {
+				return
+			}
 			// emit every step (thinking/tool_use/tool_result/text/result) so the main
 			// agent session shows its work live, like worker/planner. The final answer
 			// is the captured "result" step — no separate reply emit (would duplicate).

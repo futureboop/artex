@@ -802,14 +802,21 @@ export function SessionsTab({ taskId }: { taskId: string }) {
   }, [taskId]);
 
   React.useEffect(() => {
-    let alive = true;
     setMainChatRunning(null);
+    setStopping(false);
+  }, [taskId]);
+
+  React.useEffect(() => {
+    let alive = true;
     const load = () => {
       const request = ++chatStatusRequestRef.current;
       return api
         .chatStatus(taskId)
         .then(({ running }) => {
-          if (alive && chatStatusRequestRef.current === request) setMainChatRunning(running);
+          if (alive && chatStatusRequestRef.current === request) {
+            setMainChatRunning(running);
+            if (!running) setStopping(false);
+          }
         })
         .catch(() => {
           // Keep the last authoritative value. Before the first success, recent
@@ -817,12 +824,12 @@ export function SessionsTab({ taskId }: { taskId: string }) {
         });
     };
     void load();
-    const timer = setInterval(load, 2000);
+    const timer = setInterval(load, stopping ? 500 : 2000);
     return () => {
       alive = false;
       clearInterval(timer);
     };
-  }, [taskId]);
+  }, [taskId, stopping]);
 
   React.useEffect(() => {
     let alive = true;
@@ -936,22 +943,30 @@ export function SessionsTab({ taskId }: { taskId: string }) {
     const token = (reqTokenRef.current.mainboot ?? 0) + 1;
     reqTokenRef.current.mainboot = token;
     let bootKey = mainSessionKey(0);
-    // Resolve the main-agent segments first, then load the CURRENT segment's history and
-    // open the SSE from its snapshot cursor. The SSE tails all segments and routes each
-    // frame by session_key (main:<seg>), so switching segments needs no new stream.
+    // One history response includes the current segment and segment list. Avoid a
+    // separate serial request before the transcript and live SSE can appear.
     api
-      .mainSessions(taskId)
-      .then((ms) => {
+      .activityHistory(taskId, "main", 0, PAGE)
+      .then(async (r) => {
+        if (r.mainSessions && r.currentMainSeg !== undefined) return r;
+        // A tab already open during a server rollback may still run this newer
+        // bundle against the older API. Keep that session usable.
+        const ms = await api.mainSessions(taskId);
+        const history = await api.activityHistory(taskId, mainSessionKey(ms.current), 0, PAGE);
+        return { ...history, mainSessions: ms.sessions, currentMainSeg: ms.current };
+      })
+      .then((r) => {
         if (!alive || reqTokenRef.current.mainboot !== token) throw new Error("superseded");
-        const segs = ms.sessions.length ? ms.sessions : [{ seq: 0, created_at: "" }];
+        const segs = r.mainSessions?.length ? r.mainSessions : [{ seq: 0, created_at: "" }];
+        const current = r.currentMainSeg ?? segs[0].seq;
         setMainSegs(segs);
-        setCurrentSeg(ms.current);
-        bootKey = mainSessionKey(ms.current);
+        setCurrentSeg(current);
+        bootKey = mainSessionKey(current);
         if (bootKey !== mainSessionKey(0)) loadingKeysRef.current.delete(mainSessionKey(0));
         loadingKeysRef.current.add(bootKey);
-        setActiveId(mainSessionId(ms.current));
+        setActiveId(mainSessionId(current));
         patchStore(bootKey, (s) => ({ ...s, loading: true }));
-        return api.activityHistory(taskId, bootKey, 0, PAGE);
+        return r;
       })
       .then((r) => {
         if (!alive || reqTokenRef.current.mainboot !== token) return;
@@ -1279,7 +1294,7 @@ export function SessionsTab({ taskId }: { taskId: string }) {
   const activeLast = activeItems[activeItems.length - 1];
   const activeSettled =
     !!activeLast && (activeLast.kind === "result" || (activeLast.kind === "text" && activeLast.is_error));
-  const mainBusy = isMain && (sending || (!activeSettled && (mainChatRunning ?? recentLive(activeKey))));
+  const mainBusy = isMain && (stopping || sending || (!activeSettled && (mainChatRunning ?? recentLive(activeKey))));
   // 折叠态（手机端）标题栏要替代整张列表：显示当前会话名 + 其它会话的未读合计，
   // 否则收起后既不知道自己在看哪个会话，也看不到别处有新消息。
   const activeDisplayTitle = (active.role === "worker" ? sessionMeta.get(active.id)?.title : "") || active.title;
@@ -1488,7 +1503,19 @@ export function SessionsTab({ taskId }: { taskId: string }) {
   function stop() {
     if (stopping) return;
     setStopping(true);
-    void api.stopChat(taskId).finally(() => setStopping(false));
+    chatStatusRequestRef.current++;
+    void api
+      .stopChat(taskId)
+      .then(({ status }) => {
+        if (status === "idle") {
+          setMainChatRunning(false);
+          setStopping(false);
+        }
+      })
+      .catch((error) => {
+        setStopping(false);
+        toast.error(`停止失败：${(error as Error).message || "请稍后重试"}`);
+      });
   }
 
   function send() {
@@ -1980,9 +2007,9 @@ export function SessionsTab({ taskId }: { taskId: string }) {
                         size="icon-xs"
                         variant="destructive"
                         onClick={stop}
-                        disabled={stopping}
-                        title="停止当前执行"
-                        aria-label="停止当前执行"
+                        disabled={stopping || sending}
+                        title={stopping ? "正在停止当前执行" : "停止当前执行"}
+                        aria-label={stopping ? "正在停止当前执行" : "停止当前执行"}
                       >
                         {stopping ? <Loader2Icon className="animate-spin" /> : <SquareIcon />}
                       </InputGroupButton>

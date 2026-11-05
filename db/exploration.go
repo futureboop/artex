@@ -1199,6 +1199,18 @@ func (s *ExplorationStore) Stats() (map[string]int, error) {
 	return out, rows.Err()
 }
 
+// ActiveTaskCounts reads only the counters needed by a task detail view. Loading
+// full intent and goal rows on every poll also transfers their large payloads.
+func (s *ExplorationStore) ActiveTaskCounts() (inFlight, goalsTotal, goalsMet int, err error) {
+	err = s.db.QueryRow(`SELECT
+		COUNT(*) FILTER (WHERE kind='intent' AND state='running'),
+		COUNT(*) FILTER (WHERE kind='goal'),
+		COUNT(*) FILTER (WHERE kind='goal' AND state='met')
+		FROM exploration_nodes WHERE exploration_id=$1 AND kind IN ('intent','goal')`, s.expID).
+		Scan(&inFlight, &goalsTotal, &goalsMet)
+	return
+}
+
 // --- activity (poll by global id cursor) ---
 
 // AppendActivity records one worker step and returns its id.

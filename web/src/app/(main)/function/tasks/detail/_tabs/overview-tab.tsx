@@ -105,7 +105,7 @@ function StatCard({
 
 export function OverviewTab({ taskId }: { taskId: string }) {
   const [task, setTask] = React.useState<Task | null>(null);
-  const [stats, setStats] = React.useState<Stats | null>(null);
+  const [stats, setStats] = React.useState<Pick<Stats, "engine_mode"> | null>(null);
   const [intents, setIntents] = React.useState<TaskNode[]>([]);
   const [findings, setFindings] = React.useState<Finding[]>([]);
   const [coverage, setCoverage] = React.useState<{
@@ -357,7 +357,7 @@ export function OverviewTab({ taskId }: { taskId: string }) {
       try {
         const [taskResp, statsResp, intentsResp, findingsResp] = await Promise.all([
           api.task(taskId),
-          api.stats(taskId),
+          api.taskStats(taskId),
           api.intents(taskId),
           api.findings(taskId),
         ]);
