@@ -239,6 +239,8 @@ function compareTasks(left: Task, right: Task, field: TaskSortField, direction: 
 export default function TasksPage() {
   const [activeTab, setActiveTab] = React.useState("current");
   const [tasks, setTasks] = React.useState<Task[]>([]);
+  const [tasksLoaded, setTasksLoaded] = React.useState(false);
+  const [tasksError, setTasksError] = React.useState(false);
   const [categories, setCategories] = React.useState<TaskCategory[]>([]);
   const [categoriesLoaded, setCategoriesLoaded] = React.useState(false);
   const [query, setQuery] = React.useState("");
@@ -393,6 +395,8 @@ export default function TasksPage() {
     api
       .tasks()
       .then((r) => {
+        setTasksLoaded(true);
+        setTasksError(false);
         const next = r.tasks.map((t) => (t.id === r.active ? { ...t, active: true } : t));
         const sig = JSON.stringify(next);
         if (sig === lastRef.current) return;
@@ -400,7 +404,9 @@ export default function TasksPage() {
         setTasks(next);
       })
       .catch(() => {
-        // Polling is best-effort; the next interval retries automatically.
+        setTasksLoaded(true);
+        setTasksError(true);
+        // Keep the last successful list; the next poll retries automatically.
       });
   }, []);
 
@@ -862,7 +868,24 @@ export default function TasksPage() {
               )}
             </div>
 
-            {tasks.length === 0 ? (
+            {!tasksLoaded ? (
+              <div
+                className="mx-4 flex items-center justify-center gap-2 rounded-lg border border-dashed py-20 text-sm text-muted-foreground lg:mx-6"
+                role="status"
+              >
+                <Spinner className="size-4" /> 正在读取任务…
+              </div>
+            ) : tasksError && tasks.length === 0 ? (
+              <div
+                className="mx-4 flex flex-col items-center justify-center gap-3 rounded-lg border border-dashed py-20 text-sm text-muted-foreground lg:mx-6"
+                role="alert"
+              >
+                任务读取失败，正在自动重试。
+                <Button size="sm" variant="outline" onClick={load}>
+                  立即重试
+                </Button>
+              </div>
+            ) : tasks.length === 0 ? (
               <div className="text-muted-foreground mx-4 flex items-center justify-center rounded-lg border border-dashed py-20 text-sm lg:mx-6">
                 暂无任务，点击右上角「新建任务」开始。
               </div>
