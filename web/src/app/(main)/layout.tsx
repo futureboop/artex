@@ -30,8 +30,8 @@ function readPref<T extends string>(key: string, allowed: readonly T[], fallback
 
 export default function Layout({ children }: Readonly<{ children: ReactNode }>) {
   // Client-side auth gate — replaces the Next proxy/middleware that static export
-  // disables. No token → bounce to /login; render nothing until confirmed so no
-  // protected UI (or its API calls) flashes for a logged-out visitor.
+  // disables. No token → bounce to /login; show a public loading state until
+  // confirmed so protected UI (or its API calls) never flashes to visitors.
   const [authed, setAuthed] = React.useState(false);
   React.useEffect(() => {
     if (auth.getToken()) {
