@@ -1,11 +1,16 @@
 package agent
 
 import (
+	"context"
+	"encoding/json"
 	"log"
 	"path/filepath"
+	"strings"
 
 	"github.com/Autumn-27/norma/agentcore"
+	"github.com/Autumn-27/norma/llm"
 	"github.com/Autumn-27/norma/noaadapter"
+	"github.com/Autumn-27/norma/tool"
 )
 
 // noaWarn returns a diagnostics sink tagging non-fatal noa messages with the
@@ -43,6 +48,39 @@ func enableNoa(opts *agentcore.Options, enabled func() bool, archiveRoot, sessio
 		}
 		return
 	}
+	// Norma reports a well-formed but ineffective Compress call as a successful
+	// tool result. Models can then retry covered/protected ranges indefinitely.
+	// Keep the adapter's state and archives intact, but surface the failure and
+	// stop executing further ineffective calls in this run.
+	for i, t := range opts.Tools {
+		if t.Name() == "Compress" {
+			opts.Tools[i] = &noaCompressGuard{CoreTool: t}
+			break
+		}
+	}
 	// Compactor 覆盖 Compaction,但两者并存时 agentcore 每次会告警;明确清掉。
 	opts.Compaction = nil
+}
+
+type noaCompressGuard struct {
+	tool.CoreTool
+	consecutiveNoops int
+}
+
+func (g *noaCompressGuard) Call(ctx context.Context, input json.RawMessage, tc *tool.ToolContext) (tool.Result, error) {
+	if g.consecutiveNoops >= 2 {
+		return tool.Errorf("Compress is unavailable for the rest of this run: repeated attempts reclaimed no context. Continue the task without Compress or finish this response."), nil
+	}
+	result, err := g.CoreTool.Call(ctx, input, tc)
+	if err != nil {
+		return result, err
+	}
+	if strings.Contains(result.Flatten(), "0 blocks created") {
+		g.consecutiveNoops++
+		result.IsError = true
+		result.Content = append(result.Content, llm.TextBlock("This attempt reclaimed no context. Do not retry already compressed or protected ranges; continue the task instead."))
+	} else if !result.IsError {
+		g.consecutiveNoops = 0
+	}
+	return result, nil
 }
