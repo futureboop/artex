@@ -479,7 +479,14 @@ function WorkerAssetBadge({ assets }: { assets: IntentAsset[] }) {
   );
 }
 
-export function SessionsTab({ taskId }: { taskId: string }) {
+export function SessionsTab({
+  taskId,
+  initialHistory,
+}: {
+  taskId: string;
+  initialHistory?: ReturnType<typeof api.activityHistory>;
+}) {
+  const initialHistoryRef = React.useRef(initialHistory);
   const approvalFocus = useApprovalFocus({ taskId });
   const [selectedSessionId, setActiveId] = React.useState(MAIN_ID);
   const focusSession = React.useMemo<Session | undefined>(() => {
@@ -911,8 +918,7 @@ export function SessionsTab({ taskId }: { taskId: string }) {
     let bootKey = mainSessionKey(0);
     // One history response includes the current segment and segment list. Avoid a
     // separate serial request before the transcript and live SSE can appear.
-    api
-      .activityHistory(taskId, "main", 0, INITIAL_PAGE)
+    (initialHistoryRef.current ?? api.activityHistory(taskId, "main", 0, INITIAL_PAGE))
       .then(async (r) => {
         if (r.mainSessions && r.currentMainSeg !== undefined) return r;
         // A tab already open during a server rollback may still run this newer

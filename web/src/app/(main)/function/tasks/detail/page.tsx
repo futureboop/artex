@@ -209,11 +209,19 @@ function TaskDetailInner() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const id = searchParams.get("id") ?? "";
+  const [prefetchedHistory, setPrefetchedHistory] = React.useState<{
+    taskId: string;
+    request: ReturnType<typeof api.activityHistory>;
+  } | null>(null);
   // The default tab is the transcript. Start fetching its code while the task
-  // record is in flight so opening a task does not serialize these waits.
+  // record is in flight. Fetch its first page in parallel with the task record.
   React.useEffect(() => {
     void import("./_tabs/sessions-tab");
-  }, []);
+    if (!id) return;
+    const request = api.activityHistory(id, "main", 0, 60);
+    void request.catch(() => {}); // the detail tab consumes this same promise later
+    setPrefetchedHistory({ taskId: id, request });
+  }, [id]);
   const [task, setTask] = React.useState<Task | null>(null);
   const [paused, setPaused] = React.useState(false);
   const [loaded, setLoaded] = React.useState(false);
@@ -443,7 +451,11 @@ function TaskDetailInner() {
       {/* Tab content */}
       <div className="flex-1 p-4 lg:p-6">
         <TabsContent value="sessions" className="mt-0">
-          <SessionsTab key={id} taskId={id} />
+          <SessionsTab
+            key={id}
+            taskId={id}
+            initialHistory={prefetchedHistory?.taskId === id ? prefetchedHistory.request : undefined}
+          />
         </TabsContent>
         <TabsContent value="overview" className="mt-0">
           <OverviewTab taskId={id} />
