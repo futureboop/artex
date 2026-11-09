@@ -231,39 +231,48 @@ function TaskDetailInner() {
   const [archiving, setArchiving] = React.useState(false);
 
   React.useEffect(() => {
+    if (!loaded || task?.id !== id) return;
     api
       .llmProfiles()
       .then(setProfiles)
       .catch(() => setProfiles([]));
-  }, []);
+  }, [loaded, id, task?.id]);
 
   React.useEffect(() => {
+    if (!loaded || task?.id !== id) return;
     let alive = true;
-    const load = () =>
-      api
+    let inFlight = false;
+    const load = () => {
+      if (inFlight) return;
+      inFlight = true;
+      void api
         .interceptTask(id)
         .then((rows) => {
           if (alive) setInterceptPendingCount(rows.filter((r) => r.status === "pending").length);
         })
         .catch(() => {
           // Polling is best-effort; the next interval retries automatically.
-        });
+        })
+        .finally(() => { inFlight = false; });
+    };
     void load();
-    const t = setInterval(load, 5000);
+    const t = setInterval(load, terminal ? 30000 : 15000);
     return () => {
       alive = false;
       clearInterval(t);
     };
-  }, [id]);
+  }, [id, loaded, task?.status]);
 
   const taskLoadInFlight = React.useRef<string | null>(null);
+  const terminalTask = React.useRef(false);
   const load = React.useCallback(() => {
-    if (taskLoadInFlight.current === id) return;
+    if (!id || terminalTask.current || taskLoadInFlight.current === id) return;
     taskLoadInFlight.current = id;
     const taskRequest = api
       .task(id)
       .then((task) => {
         if (taskLoadInFlight.current !== id) return;
+        terminalTask.current = ["done", "failed", "timeout"].includes(task.status);
         setTask(task);
         setPaused(task.paused ?? false);
         setLoaded(true);
@@ -273,7 +282,7 @@ function TaskDetailInner() {
       });
     // Stats can be slower than the task record. Let the page render as soon as
     // the task arrives, then enrich the live status without blocking navigation.
-    const statsRequest = api
+    const statsRequest = taskRequest.then(() => terminalTask.current ? undefined : api
       .taskStats(id)
       .then((s) => {
         if (taskLoadInFlight.current !== id || !s.active_task) return;
@@ -294,7 +303,7 @@ function TaskDetailInner() {
       })
       .catch(() => {
         // Task details remain usable when live stats fail.
-      });
+      }));
     void Promise.allSettled([taskRequest, statsRequest]).then(() => {
       if (taskLoadInFlight.current === id) {
         taskLoadInFlight.current = null;
@@ -303,6 +312,9 @@ function TaskDetailInner() {
     });
   }, [id]);
   React.useEffect(() => {
+    terminalTask.current = false;
+    setTask(null);
+    setLoaded(false);
     load();
     const timer = setInterval(load, 5000);
     return () => clearInterval(timer);
@@ -454,6 +466,7 @@ function TaskDetailInner() {
           <SessionsTab
             key={id}
             taskId={id}
+            terminal={terminal}
             initialHistory={prefetchedHistory?.taskId === id ? prefetchedHistory.request : undefined}
           />
         </TabsContent>

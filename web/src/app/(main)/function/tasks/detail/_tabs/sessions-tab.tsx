@@ -481,9 +481,11 @@ function WorkerAssetBadge({ assets }: { assets: IntentAsset[] }) {
 
 export function SessionsTab({
   taskId,
+  terminal,
   initialHistory,
 }: {
   taskId: string;
+  terminal?: boolean;
   initialHistory?: ReturnType<typeof api.activityHistory>;
 }) {
   const initialHistoryRef = React.useRef(initialHistory);
@@ -764,12 +766,12 @@ export function SessionsTab({
           // Polling is best-effort; the next interval retries automatically.
         });
     void load();
-    const t = setInterval(load, 15_000);
+    const t = setInterval(load, terminal ? 30_000 : 15_000);
     return () => {
       alive = false;
       clearInterval(t);
     };
-  }, [taskId, historyReady]);
+  }, [taskId, historyReady, terminal]);
 
   React.useEffect(() => {
     setMainChatRunning(null);
@@ -794,14 +796,15 @@ export function SessionsTab({
         });
     };
     void load();
-    const timer = setInterval(load, stopping ? 500 : 2000);
+    const timer = setInterval(load, stopping ? 500 : terminal && !sending && !mainChatRunning ? 10_000 : 2000);
     return () => {
       alive = false;
       clearInterval(timer);
     };
-  }, [taskId, stopping]);
+  }, [taskId, stopping, sending, mainChatRunning, terminal]);
 
   React.useEffect(() => {
+    if (!historyReady) return;
     let alive = true;
     const load = () =>
       api
@@ -813,31 +816,36 @@ export function SessionsTab({
           // Polling is best-effort; the next interval retries automatically.
         });
     void load();
-    const timer = setInterval(load, 10_000);
+    const timer = setInterval(load, terminal ? 30_000 : 10_000);
     return () => {
       alive = false;
       clearInterval(timer);
     };
-  }, [taskId]);
+  }, [taskId, historyReady, terminal]);
 
   React.useEffect(() => {
+    if (!historyReady) return;
     let alive = true;
-    const load = () =>
-      api
+    let inFlight = false;
+    const load = () => {
+      if (inFlight) return;
+      inFlight = true;
+      void api
         .interceptTask(taskId)
         .then((rows) => {
           if (alive) setPendingIntercepts(rows.filter((r) => r.status === "pending"));
         })
         .catch(() => {
           // Polling is best-effort; the next interval retries automatically.
-        });
+        }).finally(() => { inFlight = false; });
+    };
     void load();
-    const t = setInterval(load, 5000);
+    const t = setInterval(load, terminal ? 30_000 : 15_000);
     return () => {
       alive = false;
       clearInterval(t);
     };
-  }, [taskId]);
+  }, [taskId, historyReady, terminal]);
 
   // Re-render on a timer so "streaming" liveness recomputes as activity goes stale.
   const [, setTick] = React.useState(0);
@@ -1038,6 +1046,7 @@ export function SessionsTab({
 
   // ── worker (intent) session list — paged, poll first page lightly ───────────────
   React.useEffect(() => {
+    if (!historyReady) return;
     let active = true;
     firstIntentsRef.current = [];
     setIntents([]);
@@ -1069,12 +1078,12 @@ export function SessionsTab({
           // Polling is best-effort; the next interval retries automatically.
         });
     void load();
-    const t = setInterval(load, 5000);
+    const t = setInterval(load, terminal ? 30_000 : 15_000);
     return () => {
       active = false;
       clearInterval(t);
     };
-  }, [taskId]);
+  }, [taskId, historyReady, terminal]);
 
   const loadOlderIntents = React.useCallback(() => {
     if (loadingOlderIntents) return;
