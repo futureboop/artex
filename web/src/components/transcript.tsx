@@ -685,7 +685,7 @@ function AnswerBlock({ step, getDetail }: { step: Activity; getDetail: (seq: num
 // the compact, grouped, expand-to-detail format — thinking, tool calls/results,
 // and (for the main agent) the human turns. Worker lane chips show only when the
 // view actually mixes agents.
-function ExecView({
+const ExecView = React.memo(function ExecView({
   activity,
   taskId,
   chat,
@@ -734,7 +734,7 @@ function ExecView({
       )}
     </div>
   );
-}
+});
 
 // Transcript renders a session's activity as a compact grouped execution replay:
 // human turns, thinking, tool calls (command+result paired), and messages — for

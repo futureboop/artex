@@ -193,7 +193,7 @@ export default function DashboardPage() {
           api.settings(),
           api.interceptPending(),
           api.activity(undefined, { limit: 30 }),
-          api.tokenStats(),
+          api.tokenStats(undefined, "total"),
           api.conversationTokens(),
         ]);
         if (!alive) return;

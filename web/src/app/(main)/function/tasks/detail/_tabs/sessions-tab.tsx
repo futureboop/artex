@@ -95,8 +95,9 @@ function fmtBytes(n: number): string {
 //   • History + SSE meet gap-free at snapshot_cursor and are merged by seq (dedup),
 //     so refresh / tab-switch / sleep / reconnect never drop the newest records.
 
-const PAGE = 200; // history page size
-const SYSTEM_SCAN_PAGE = 500; // generic activity pages scanned to recover sparse system audit events
+const PAGE = 100; // older history pages loaded on scroll
+const INITIAL_PAGE = 60; // render the recent conversation promptly on first open
+const INTENTS_PAGE = 100; // keep the worker sidebar cheap on large tasks
 const MAX_KEEP = 4000; // per-session in-memory cap; older pages re-fetched on scroll-up
 const STREAM_WINDOW_MS = 5000; // "live" = activity seen within this window
 const MAX_WORKER_MESSAGE_CHARS = 4000;
@@ -637,6 +638,7 @@ export function SessionsTab({ taskId }: { taskId: string }) {
   // Whole-task token total (all agents), polled from the backend aggregate.
   const [taskTokens, setTaskTokens] = React.useState<TokenTotal | null>(null);
   const [sessionTokens, setSessionTokens] = React.useState<Record<string, SessionTokenUsage>>({});
+  const [historyReady, setHistoryReady] = React.useState(false);
   const [llmResolutions, setLLMResolutions] = React.useState<TaskLLMResolutions | null>(null);
   // Pending intercept requests for this task — used to show warning icons on sessions.
   const [pendingIntercepts, setPendingIntercepts] = React.useState<InterceptApprovalRow[]>([]);
@@ -657,6 +659,7 @@ export function SessionsTab({ taskId }: { taskId: string }) {
   // first-load effect and the active-session effect both want "main" on mount (the
   // former also opens the SSE, so it must not be pre-empted).
   const loadingKeysRef = React.useRef<Set<string>>(new Set());
+  const loadingEarlierKeysRef = React.useRef<Set<string>>(new Set());
 
   // ── store helpers ──────────────────────────────────────────────────────────────
   const patchStore = React.useCallback((key: string, fn: (s: SessionState) => SessionState) => {
@@ -673,49 +676,6 @@ export function SessionsTab({ taskId }: { taskId: string }) {
       const token = (reqTokenRef.current[key] ?? 0) + 1;
       reqTokenRef.current[key] = token;
       patchStore(key, (s) => ({ ...s, loading: true, error: undefined }));
-
-      if (key === "system") {
-        void (async () => {
-          let since = 0;
-          let systemItems: Activity[] = [];
-          for (;;) {
-            const page = await api.activity(taskId, { since, limit: SYSTEM_SCAN_PAGE });
-            if (reqTokenRef.current[key] !== token) return;
-            systemItems = mergeBySeq(
-              systemItems,
-              page.items.filter(
-                (item) => item.worker === "system" || item.kind === "llm_switch" || item.kind === "llm_failover",
-              ),
-            );
-            if (page.items.length < SYSTEM_SCAN_PAGE || page.cursor <= since) break;
-            since = page.cursor;
-          }
-          patchStore(key, (s) => {
-            const items = mergeBySeq(systemItems, s.items);
-            return {
-              ...s,
-              items,
-              loaded: true,
-              loading: false,
-              hasMore: false,
-              earliestSeq: items.length ? items[0].seq : 0,
-              unread: 0,
-              lastTs: items.length ? items[items.length - 1].ts : s.lastTs,
-              error: undefined,
-            };
-          });
-        })()
-          .catch((error) => {
-            if (reqTokenRef.current[key] !== token) return;
-            patchStore(key, (s) => ({
-              ...s,
-              loading: false,
-              error: (error as Error).message || "加载失败",
-            }));
-          })
-          .finally(() => loadingKeysRef.current.delete(key));
-        return;
-      }
 
       api
         .activityHistory(taskId, key, 0, PAGE)
@@ -749,7 +709,8 @@ export function SessionsTab({ taskId }: { taskId: string }) {
   const loadEarlier = React.useCallback(
     (key: string, viewport: () => HTMLElement | null) => {
       const st = store[key];
-      if (!st || st.loadingMore || !st.hasMore || !st.earliestSeq) return;
+      if (!st || st.loadingMore || loadingEarlierKeysRef.current.has(key) || !st.hasMore || !st.earliestSeq) return;
+      loadingEarlierKeysRef.current.add(key);
       const vp = viewport();
       const prevH = vp?.scrollHeight ?? 0;
       const prevTop = vp?.scrollTop ?? 0;
@@ -774,17 +735,19 @@ export function SessionsTab({ taskId }: { taskId: string }) {
         })
         .catch(() => {
           patchStore(key, (s) => ({ ...s, loadingMore: false }));
-        });
+        })
+        .finally(() => loadingEarlierKeysRef.current.delete(key));
     },
     [taskId, store, patchStore],
   );
 
   // ── task token total (whole task, all agents) ───────────────────────────────────
   React.useEffect(() => {
+    if (!historyReady) return;
     let alive = true;
     const load = () =>
       api
-        .tokenStats(taskId)
+        .tokenStats(taskId, "sessions")
         .then((r) => {
           if (!alive) return;
           setTaskTokens(r.total);
@@ -794,12 +757,12 @@ export function SessionsTab({ taskId }: { taskId: string }) {
           // Polling is best-effort; the next interval retries automatically.
         });
     void load();
-    const t = setInterval(load, 5000);
+    const t = setInterval(load, 15_000);
     return () => {
       alive = false;
       clearInterval(t);
     };
-  }, [taskId]);
+  }, [taskId, historyReady]);
 
   React.useEffect(() => {
     setMainChatRunning(null);
@@ -892,6 +855,7 @@ export function SessionsTab({ taskId }: { taskId: string }) {
     setHasLoadedOlderIntentsPage(false);
     setTaskTokens(null);
     setSessionTokens({});
+    setHistoryReady(false);
     setLLMResolutions(null);
     setSseLive(false);
     setActiveId(MAIN_ID); // a stale worker id from the previous task must not leak in
@@ -928,13 +892,15 @@ export function SessionsTab({ taskId }: { taskId: string }) {
           buckets[mainSessionKey(0)] ??= { ...emptyState(), loaded: true };
           buckets.system ??= { ...emptyState(), loaded: true };
           setStore(buckets);
+          setHistoryReady(true);
         })
-        .catch(() =>
+        .catch(() => {
           setStore({
             [mainSessionKey(0)]: { ...emptyState(), loaded: true },
             system: { ...emptyState(), loaded: true },
-          }),
-        );
+          });
+          setHistoryReady(true);
+        });
       return () => {
         alive = false;
       };
@@ -946,13 +912,13 @@ export function SessionsTab({ taskId }: { taskId: string }) {
     // One history response includes the current segment and segment list. Avoid a
     // separate serial request before the transcript and live SSE can appear.
     api
-      .activityHistory(taskId, "main", 0, PAGE)
+      .activityHistory(taskId, "main", 0, INITIAL_PAGE)
       .then(async (r) => {
         if (r.mainSessions && r.currentMainSeg !== undefined) return r;
         // A tab already open during a server rollback may still run this newer
         // bundle against the older API. Keep that session usable.
         const ms = await api.mainSessions(taskId);
-        const history = await api.activityHistory(taskId, mainSessionKey(ms.current), 0, PAGE);
+        const history = await api.activityHistory(taskId, mainSessionKey(ms.current), 0, INITIAL_PAGE);
         return { ...history, mainSessions: ms.sessions, currentMainSeg: ms.current };
       })
       .then((r) => {
@@ -983,6 +949,7 @@ export function SessionsTab({ taskId }: { taskId: string }) {
             unread: 0,
           };
         });
+        setHistoryReady(true);
         // Open the single task SSE from the snapshot cursor.
         const es = new EventSource(
           sseUrl(`/api/exploration/activity/stream?task=${encodeURIComponent(taskId)}&since=${snapshotRef.current}`),
@@ -1052,6 +1019,7 @@ export function SessionsTab({ taskId }: { taskId: string }) {
         if (!alive || reqTokenRef.current.mainboot !== token) return;
         if ((err as Error).message === "superseded") return;
         patchStore(bootKey, (s) => ({ ...s, loading: false, error: (err as Error).message || "加载失败" }));
+        setHistoryReady(true);
       })
       .finally(() => loadingKeysRef.current.delete(bootKey));
 
@@ -1061,25 +1029,6 @@ export function SessionsTab({ taskId }: { taskId: string }) {
       esRef.current = null;
     };
   }, [taskId, patchStore]);
-
-  React.useEffect(() => {
-    let active = true;
-    const load = () =>
-      api
-        .taskIntentAssets(taskId)
-        .then((assets) => {
-          if (active) setIntentAssets(assets);
-        })
-        .catch(() => {
-          // The next poll retries; Worker controls and transcripts remain available.
-        });
-    void load();
-    const timer = setInterval(load, 5000);
-    return () => {
-      active = false;
-      clearInterval(timer);
-    };
-  }, [taskId]);
 
   // ── worker (intent) session list — paged, poll first page lightly ───────────────
   React.useEffect(() => {
@@ -1091,7 +1040,7 @@ export function SessionsTab({ taskId }: { taskId: string }) {
     setOlderIntentsHasMore(false);
     const load = () =>
       api
-        .intentsPage(taskId, 0, 300)
+        .intentsPage(taskId, 0, INTENTS_PAGE)
         .then((r) => {
           if (!active) return;
           const freshIds = new Set(r.items.map((item) => item.id));
@@ -1128,7 +1077,7 @@ export function SessionsTab({ taskId }: { taskId: string }) {
     if (!Number.isFinite(minId)) return;
     setLoadingOlderIntents(true);
     api
-      .intentsPage(taskId, minId, 300)
+      .intentsPage(taskId, minId, INTENTS_PAGE)
       .then((r) => {
         setOlderIntents((prev) => {
           const seen = new Set([...intents, ...prev].map((n) => n.id));
@@ -1274,6 +1223,34 @@ export function SessionsTab({ taskId }: { taskId: string }) {
   };
 
   const active = sessions.find((s) => s.id === activeId) ?? MAIN_SESSION;
+  const activeIntentID = active.role === "worker" ? active.intent_id : undefined;
+  React.useEffect(() => {
+    setIntentAssets([]);
+    if (!activeIntentID) return;
+    let alive = true;
+    let inFlight = false;
+    const load = () => {
+      if (inFlight || document.hidden) return;
+      inFlight = true;
+      void api
+        .taskIntentAssets(taskId, activeIntentID)
+        .then((assets) => {
+          if (alive) setIntentAssets(assets);
+        })
+        .catch(() => {
+          // Keep the transcript usable; the next refresh retries the asset labels.
+        })
+        .finally(() => {
+          inFlight = false;
+        });
+    };
+    load();
+    const timer = setInterval(load, 15_000);
+    return () => {
+      alive = false;
+      clearInterval(timer);
+    };
+  }, [taskId, activeIntentID]);
   const side = useSideQuestions(
     active.role === "mainagent"
       ? `/api/tasks/${taskId}/chat`
@@ -1896,6 +1873,13 @@ export function SessionsTab({ taskId }: { taskId: string }) {
             the panel instead of overflowing horizontally. */}
             <ScrollArea type="auto" className="min-h-0 min-w-0 flex-1 [&_[data-slot=scroll-area-viewport]>div]:block!">
               <div className="min-w-0 max-w-full p-4" ref={contentRef}>
+                {activeState?.hasMore && !activeState.loadingMore && (
+                  <div className="flex justify-center pb-2">
+                    <Button size="sm" variant="ghost" onClick={() => loadEarlier(activeKey, viewport)}>
+                      加载更早历史
+                    </Button>
+                  </div>
+                )}
                 {activeState?.loadingMore && (
                   <div className="flex items-center justify-center gap-2 pb-2 text-xs text-muted-foreground">
                     <Loader2Icon className="size-3.5 animate-spin" />

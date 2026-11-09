@@ -46,6 +46,7 @@ func TestActivityPageSessions(t *testing.T) {
 	}
 	appendN(5, Activity{NodeID: &intentA, Worker: "work#1", Kind: "text", Summary: "a2"}) // workerA → 30 total
 	appendN(5, Activity{NodeID: &intentB, Worker: "work#2", Kind: "text", Summary: "b"})
+	appendN(2, Activity{Worker: "system", Kind: "llm_switch", Summary: "switch"})
 
 	// snapshot cursor = max id across the whole task.
 	snap, err := es.ActivityMaxID()
@@ -92,6 +93,10 @@ func TestActivityPageSessions(t *testing.T) {
 	plan := collect(ActivitySessionFilter{Worker: "planner"}, 7)
 	if len(plan) != 25 {
 		t.Fatalf("plan count = %d, want 25", len(plan))
+	}
+	system := collect(ActivitySessionFilter{Worker: "system"}, 1)
+	if len(system) != 2 {
+		t.Fatalf("system count = %d, want 2", len(system))
 	}
 	wa := collect(ActivitySessionFilter{NodeID: &intentA}, 8)
 	if len(wa) != 30 {

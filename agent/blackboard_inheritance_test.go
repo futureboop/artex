@@ -115,7 +115,7 @@ func TestGraphOverviewExpandsAssociatedCompanyScope(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	workerAssets, err := assets.IntentAssets(task.ID)
+	workerAssets, err := assets.IntentAssets(task.ID, nil)
 	if err != nil || len(workerAssets) != 1 || workerAssets[0].IntentID != intentID || workerAssets[0].AssetID != assetID {
 		t.Fatalf("worker target did not retain company asset: assets=%+v err=%v", workerAssets, err)
 	}
@@ -154,7 +154,7 @@ func TestGraphOverviewExpandsAssociatedCompanyScope(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	disabledWorkerAssets, err := assets.IntentAssets(disabledTask.ID)
+	disabledWorkerAssets, err := assets.IntentAssets(disabledTask.ID, nil)
 	if err != nil || len(disabledWorkerAssets) != 1 || disabledWorkerAssets[0].IntentID != disabledIntentID || disabledWorkerAssets[0].AssetID != assetID {
 		t.Fatalf("coverage-disabled worker target=%+v err=%v", disabledWorkerAssets, err)
 	}

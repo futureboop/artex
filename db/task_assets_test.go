@@ -175,7 +175,7 @@ func TestIntentAssetsIncludesDirectSourceProvenance(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	assets, err := d.Assets().IntentAssets(current.ID)
+	assets, err := d.Assets().IntentAssets(current.ID, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -184,5 +184,14 @@ func TestIntentAssetsIncludesDirectSourceProvenance(t *testing.T) {
 	}
 	if assets[0].Source != "agent" || assets[0].SourceSummary == "" || assets[0].SourceNodeID == nil || *assets[0].SourceNodeID != intentID {
 		t.Fatalf("unexpected intent provenance: %+v", assets[0])
+	}
+	filtered, err := d.Assets().IntentAssets(current.ID, &intentID)
+	if err != nil || len(filtered) != 1 || filtered[0].IntentID != intentID {
+		t.Fatalf("filtered intent assets = %+v, err = %v", filtered, err)
+	}
+	otherID := intentID + 1_000_000_000
+	filtered, err = d.Assets().IntentAssets(current.ID, &otherID)
+	if err != nil || len(filtered) != 0 {
+		t.Fatalf("unrelated intent assets = %+v, err = %v", filtered, err)
 	}
 }

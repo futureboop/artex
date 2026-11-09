@@ -2739,6 +2739,8 @@ func parseActivitySession(sess string) (db.ActivitySessionFilter, bool) {
 		return db.ActivitySessionFilter{Main: true, MainSeg: &seg}, true
 	case sess == "plan":
 		return db.ActivitySessionFilter{Worker: "planner"}, true
+	case sess == "system":
+		return db.ActivitySessionFilter{Worker: "system"}, true
 	case strings.HasPrefix(sess, "intent:"):
 		id, err := strconv.ParseInt(strings.TrimPrefix(sess, "intent:"), 10, 64)
 		if err != nil {
@@ -2881,15 +2883,23 @@ func (s *Server) tokenStats(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
-	stats, err := t.Store.TokenStatsByWorker()
-	if err != nil {
-		writeErr(w, 500, err.Error())
-		return
+	view := r.URL.Query().Get("view")
+	stats := []db.TokenUsage{}
+	sessions := []db.SessionTokenUsage{}
+	var err error
+	if view != "total" && view != "sessions" {
+		stats, err = t.Store.TokenStatsByWorker()
+		if err != nil {
+			writeErr(w, 500, err.Error())
+			return
+		}
 	}
-	sessions, err := t.Store.TokenStatsBySession()
-	if err != nil {
-		writeErr(w, 500, err.Error())
-		return
+	if view != "total" {
+		sessions, err = t.Store.TokenStatsBySession()
+		if err != nil {
+			writeErr(w, 500, err.Error())
+			return
+		}
 	}
 	total, err := t.Store.TokenTotal() // whole-task total (all agents)
 	if err != nil {

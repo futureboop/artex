@@ -3,6 +3,7 @@ package server
 import (
 	"errors"
 	"net/http"
+	"strconv"
 	"strings"
 
 	"github.com/Autumn-27/artex/db"
@@ -99,7 +100,16 @@ func (s *Server) taskIntentAssets(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	taskID, _ := parseTaskID(task.ID)
-	assets, err := s.m.Assets().IntentAssets(taskID)
+	var intentID *int64
+	if raw := r.URL.Query().Get("intent_id"); raw != "" {
+		id, err := strconv.ParseInt(raw, 10, 64)
+		if err != nil || id <= 0 {
+			writeErr(w, http.StatusBadRequest, "invalid intent_id")
+			return
+		}
+		intentID = &id
+	}
+	assets, err := s.m.Assets().IntentAssets(taskID, intentID)
 	if err != nil {
 		writeTaskAssetError(w, err)
 		return

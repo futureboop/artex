@@ -5,7 +5,6 @@
 
 import type { ChatMention } from "@/lib/chat-mentions";
 import { MOCK } from "@/lib/mock/enabled";
-import { mockHandle } from "@/lib/mock/handler";
 import type {
   ActiveFindingRetest,
   Activity,
@@ -112,7 +111,10 @@ function getToken(): string | null {
 }
 
 export async function http<T>(path: string, init?: RequestInit): Promise<T> {
-  if (MOCK) return mockHandle<T>(init?.method ?? "GET", path, init?.body ?? null);
+  if (MOCK) {
+    const { mockHandle } = await import("@/lib/mock/handler");
+    return mockHandle<T>(init?.method ?? "GET", path, init?.body ?? null);
+  }
   const token = getToken();
   const r = await fetch(`/api${path}`, {
     ...init,
@@ -513,8 +515,10 @@ export const api = {
   registerTaskAssetScopes: (taskId: string, scope: CompanyScopeRule[]) =>
     post<TaskAssetScopeMutation>(`/tasks/${taskId}/assets`, { scope }),
   detachTaskAsset: (taskId: string, assetId: number) => del<{ detached: number }>(`/tasks/${taskId}/assets/${assetId}`),
-  taskIntentAssets: (taskId: string) =>
-    get<{ assets: IntentAsset[] }>(`/tasks/${taskId}/intent-assets`).then((r) => arr(r.assets)),
+  taskIntentAssets: (taskId: string, intentId?: string) =>
+    get<{ assets: IntentAsset[] }>(
+      `/tasks/${taskId}/intent-assets${intentId ? `?intent_id=${encodeURIComponent(intentId)}` : ""}`,
+    ).then((r) => arr(r.assets)),
 
   // ---- companies (企业 + 资产范围；归属唯一来源) ----
   companies: () => get<Company[]>("/companies").then(arr),
@@ -691,9 +695,9 @@ export const api = {
   deepenFinding: (id: string, description: string) =>
     post<FindingDeepenResponse>(`/exploration/findings/${id}/deepen`, { description }),
   intents: (task?: string) => get<TaskNode[]>(`/exploration/intents${tq(task)}`).then(arr),
-  tokenStats: (task?: string) =>
+  tokenStats: (task?: string, view?: "total" | "sessions") =>
     get<{ workers: TokenUsage[]; sessions: SessionTokenUsage[]; total: TokenTotal }>(
-      `/exploration/tokens${tq(task)}`,
+      `/exploration/tokens${tq(task)}${view ? `${task ? "&" : "?"}view=${view}` : ""}`,
     ).then((r) => ({
       workers: arr(r.workers),
       sessions: arr(r.sessions),
