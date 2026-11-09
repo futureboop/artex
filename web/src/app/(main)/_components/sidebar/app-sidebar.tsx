@@ -12,18 +12,24 @@ import {
   SidebarMenu,
   SidebarMenuButton,
   SidebarMenuItem,
+  useSidebar,
 } from "@/components/ui/sidebar";
 import { APP_CONFIG } from "@/config/app-config";
 import { useCurrentUser } from "@/hooks/use-current-user";
+import type { UiMode } from "@/lib/ui-mode";
 import { sidebarItems } from "@/navigation/sidebar/sidebar-items";
 import { usePreferencesStore } from "@/stores/preferences/preferences-provider";
 
 import { NavMain } from "./nav-main";
 import { NavUser } from "./nav-user";
-import { SidebarSupportCard } from "./sidebar-support-card";
+import { UiModeSwitch } from "./ui-mode-switch";
 
-export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
+export function AppSidebar({
+  onModeChange,
+  ...props
+}: React.ComponentProps<typeof Sidebar> & { onModeChange: (mode: UiMode) => void }) {
   const currentUser = useCurrentUser();
+  const { state, isMobile } = useSidebar();
   const { sidebarVariant, sidebarCollapsible, isSynced } = usePreferencesStore(
     useShallow((s) => ({
       sidebarVariant: s.sidebarVariant,
@@ -58,6 +64,7 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
         {/* <NavSecondary items={data.navSecondary} className="mt-auto" /> */}
       </SidebarContent>
       <SidebarFooter>
+        <UiModeSwitch mode="classic" onChange={onModeChange} compact={state === "collapsed" && !isMobile} />
         <NavUser user={currentUser} />
       </SidebarFooter>
     </Sidebar>

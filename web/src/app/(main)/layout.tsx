@@ -3,9 +3,8 @@
 import type { ReactNode } from "react";
 import * as React from "react";
 
-import dynamic from "next/dynamic";
-
 import { auth } from "@/lib/auth";
+import { AuthenticatedShell } from "./_components/authenticated-shell";
 
 function StartupStatus({ message }: { message: string }) {
   return (
@@ -25,12 +24,6 @@ function StartupStatus({ message }: { message: string }) {
     </main>
   );
 }
-
-// Keep the token check independent of navigation, toolbars and page code.
-const AuthenticatedShell = dynamic(
-  () => import("./_components/authenticated-shell").then((m) => m.AuthenticatedShell),
-  { loading: () => <StartupStatus message="正在载入界面…" /> },
-);
 
 export default function Layout({ children }: Readonly<{ children: ReactNode }>) {
   const [authed, setAuthed] = React.useState(false);

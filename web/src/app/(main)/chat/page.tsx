@@ -1,6 +1,7 @@
 "use client";
 
 import * as React from "react";
+import dynamic from "next/dynamic";
 
 import {
   ArrowUpIcon,
@@ -26,7 +27,6 @@ import { MentionTextarea } from "@/components/mention-textarea";
 import { SideQuestionButton, SideQuestionWorkspace } from "@/components/side-question-workspace";
 import { TodoPopover } from "@/components/todo-popover";
 import { ApprovalExecutionFocus, useApprovalFocus, useApprovalHistory } from "@/components/approval-execution-focus";
-import { Transcript } from "@/components/transcript";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -88,7 +88,16 @@ function fmtDuration(ms: number): string {
 // HISTORY_PAGE is how many steps one history page loads: the latest page on open,
 // then one more page each time the user scrolls to the top. Kept modest so a long
 // thread stays snappy (only ~a page of rows is in the DOM until you scroll up).
-const HISTORY_PAGE = 200;
+const HISTORY_PAGE = 100;
+// The transcript pulls in markdown rendering and detailed tool views. The list
+// can become interactive while those modules load only for an open conversation.
+const Transcript = dynamic(() => import("@/components/transcript").then((module) => module.Transcript), {
+  loading: () => (
+    <div className="py-6 text-center text-sm text-muted-foreground" role="status">
+      正在载入消息…
+    </div>
+  ),
+});
 const CONVERSATION_LIST_PAGE = 100;
 
 // Which agent groups the user has collapsed in the left rail. Persisted so the
@@ -607,14 +616,23 @@ function ChatView({
     };
   }, [running, conv.id, onTitleMaybeChanged]);
 
-  const loadFocusPage = React.useCallback((before: number) => api.conversationHistory(conv.id, before, HISTORY_PAGE), [conv.id]);
+  const loadFocusPage = React.useCallback(
+    (before: number) => api.conversationHistory(conv.id, before, HISTORY_PAGE),
+    [conv.id],
+  );
   const mergeFocusPage = React.useCallback((page: { items: Activity[]; hasMore: boolean }) => {
     setMessages((prev) => mergeActivities(page.items, prev));
     earliestRef.current = page.items[0]?.seq ?? earliestRef.current;
     hasMoreRef.current = page.hasMore;
     setHasMore(page.hasMore);
   }, []);
-  const focusHistory = useApprovalHistory(approvalFocus.state?.source, historyLoaded, messages, loadFocusPage, mergeFocusPage);
+  const focusHistory = useApprovalHistory(
+    approvalFocus.state?.source,
+    historyLoaded,
+    messages,
+    loadFocusPage,
+    mergeFocusPage,
+  );
 
   // ---- transcript auto-scroll (open → bottom; stick to bottom unless scrolled up) ----
   const contentRef = React.useRef<HTMLDivElement | null>(null);
@@ -623,6 +641,10 @@ function ChatView({
     () => (contentRef.current?.closest('[data-slot="scroll-area-viewport"]') as HTMLElement | null) ?? null,
     [],
   );
+  const onTranscriptReady = React.useCallback(() => {
+    const vp = viewport();
+    if (vp && atBottomRef.current) vp.scrollTop = vp.scrollHeight;
+  }, [viewport]);
   // Scroll-up loads one older page and prepends it, preserving the visual position
   // so the view doesn't jump (record height/offset before, restore the delta after).
   const loadEarlier = React.useCallback(async () => {
@@ -804,7 +826,14 @@ function ChatView({
               {hasMore && (
                 <div className="text-muted-foreground/70 pb-2 text-center text-[11px]">向上滚动加载更早的消息…</div>
               )}
-              <Transcript activity={messages} live={running} chat fetchDetail={fetchDetail} focusedSeq={focusHistory.ready ? approvalFocus.state?.source?.seq : undefined} />
+              <Transcript
+                activity={messages}
+                live={running}
+                chat
+                fetchDetail={fetchDetail}
+                focusedSeq={focusHistory.ready ? approvalFocus.state?.source?.seq : undefined}
+                onReady={onTranscriptReady}
+              />
             </>
           )}
         </div>
@@ -1050,15 +1079,18 @@ export default function ChatPage() {
   const [selectedId, setSelectedId] = React.useState<number | null>(null);
   const [sourceRequested, setSourceRequested] = React.useState(false);
   const [convsLoaded, setConvsLoaded] = React.useState(false);
-  const selectConversation = React.useCallback((id: number | null) => {
-    if (id !== selectedId) {
-      const url = new URL(window.location.href);
-      url.searchParams.delete("approval");
-      setSourceRequested(false);
-      window.history.replaceState(null, "", url);
-    }
-    setSelectedId(id);
-  }, [selectedId]);
+  const selectConversation = React.useCallback(
+    (id: number | null) => {
+      if (id !== selectedId) {
+        const url = new URL(window.location.href);
+        url.searchParams.delete("approval");
+        setSourceRequested(false);
+        window.history.replaceState(null, "", url);
+      }
+      setSelectedId(id);
+    },
+    [selectedId],
+  );
 
   const [renamingId, setRenamingId] = React.useState<number | null>(null);
   const [renameText, setRenameText] = React.useState("");
@@ -1081,11 +1113,16 @@ export default function ChatPage() {
   >({});
 
   const conversationListSeq = React.useRef(0);
+  const hasRunningConversation = React.useRef(false);
   const reloadConvs = React.useCallback(async () => {
     const seq = ++conversationListSeq.current;
     try {
       const items = await api.conversations();
-      if (seq === conversationListSeq.current) { setConvs(items); setConvsLoaded(true); }
+      if (seq === conversationListSeq.current) {
+        hasRunningConversation.current = items.some((item) => item.running);
+        setConvs(items);
+        setConvsLoaded(true);
+      }
     } catch {
       // Preserve the selected transcript and list on a transient poll failure.
     }
@@ -1105,20 +1142,34 @@ export default function ChatPage() {
       });
   }, []);
 
-  // One list poll supplies runtime state for all sidebar rows, including the
-  // unselected ones. Await completion so slow requests do not overlap.
+  // Keep active turns responsive without re-reading every idle conversation
+  // every two seconds. Await completion so slow requests do not overlap.
   React.useEffect(() => {
     let disposed = false;
     let timer: ReturnType<typeof setTimeout>;
+    let polling = false;
     async function poll() {
+      if (disposed || polling) return;
+      polling = true;
       await reloadConvs();
-      if (!disposed) timer = setTimeout(() => void poll(), 2000);
+      polling = false;
+      if (!disposed) {
+        const delay = document.hidden ? 30_000 : hasRunningConversation.current ? 2_000 : 10_000;
+        timer = setTimeout(() => void poll(), delay);
+      }
     }
+    const onVisibilityChange = () => {
+      if (document.hidden) return;
+      clearTimeout(timer);
+      if (!polling) void poll();
+    };
+    document.addEventListener("visibilitychange", onVisibilityChange);
     void poll();
     return () => {
       disposed = true;
       conversationListSeq.current++;
       clearTimeout(timer);
+      document.removeEventListener("visibilitychange", onVisibilityChange);
     };
   }, [reloadConvs]);
 
