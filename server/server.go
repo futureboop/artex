@@ -259,6 +259,9 @@ func New(ctx context.Context, m *Manager, skillDir string, dataDir string, keyDi
 	} else {
 		log.Printf("[engine] no LLM provider configured — engine idle until set via /api/llm or env")
 	}
+	if m.pg != nil {
+		go s.readTaskListReady()
+	}
 	s.restoreTaskRuntimes()
 	// Prime the task-list aggregates while the server starts. Requests can use
 	// the latest completed snapshot without waiting behind busy worker queries.
