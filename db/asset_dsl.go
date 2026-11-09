@@ -1,11 +1,17 @@
 package db
 
 import (
+	"context"
 	"fmt"
 	"strconv"
 	"strings"
+	"time"
 	"unicode"
 )
+
+// A broad scope predicate can otherwise scan assets for minutes and hold a
+// relation read lock that blocks schema checks during a service restart.
+const scopedAssetQueryTimeout = time.Minute
 
 // Expr is one leaf DSL clause.
 type Expr struct {
@@ -585,7 +591,9 @@ func (s *AssetStore) QueryDSLInScope(dsl, typ string, taskID int64, limit, offse
 	args = append(args, limit, offset)
 	q := `WITH ` + scopeTargetCTE + ` ` + assetSelectCols + " WHERE " + where +
 		fmt.Sprintf(" ORDER BY last_seen DESC, id DESC LIMIT $%d OFFSET $%d", len(args)-1, len(args))
-	rows, err := s.db.Query(q, args...)
+	ctx, cancel := context.WithTimeout(context.Background(), scopedAssetQueryTimeout)
+	defer cancel()
+	rows, err := s.db.QueryContext(ctx, q, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -621,7 +629,9 @@ func (s *AssetStore) GetByIDsInScope(taskID int64, ids []int64) ([]*Asset, error
 	q := `WITH ` + scopeTargetCTE + ` ` + assetSelectCols +
 		" WHERE id IN (" + strings.Join(placeholders, ",") + ")" +
 		" AND id IN (SELECT id FROM target) ORDER BY last_seen DESC, id DESC"
-	rows, err := s.db.Query(q, args...)
+	ctx, cancel := context.WithTimeout(context.Background(), scopedAssetQueryTimeout)
+	defer cancel()
+	rows, err := s.db.QueryContext(ctx, q, args...)
 	if err != nil {
 		return nil, err
 	}
