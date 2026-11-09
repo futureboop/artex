@@ -1349,7 +1349,9 @@ func (d *DB) TaskListMetricsAll() (map[int64]TaskListMetrics, error) {
 			SELECT EXTRACT(EPOCH FROM created_at)::bigint AS created_at
 			FROM activity
 			WHERE exploration_id=task.exploration_id
-			ORDER BY created_at DESC
+			-- Qualify the base column: ORDER BY the projected epoch alias forces
+			-- a scan and sort of every activity row for every task.
+			ORDER BY activity.created_at DESC
 			LIMIT 1
 		) latest_activity ON true
 		LEFT JOIN LATERAL (

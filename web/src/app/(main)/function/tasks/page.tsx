@@ -396,9 +396,12 @@ export default function TasksPage() {
   // POLL_MS but usually comes back unchanged, and setTasks on an identical payload would
   // re-render the whole page for nothing. Bail out when it matches.
   const lastRef = React.useRef<string>("");
+  const listInFlight = React.useRef(false);
 
   const load = React.useCallback(() => {
-    api
+    if (listInFlight.current) return;
+    listInFlight.current = true;
+    void api
       .tasks()
       .then((r) => {
         setTasksLoaded(true);
@@ -413,7 +416,8 @@ export default function TasksPage() {
         setTasksLoaded(true);
         setTasksError(true);
         // Keep the last successful list; the next poll retries automatically.
-      });
+      })
+      .finally(() => { listInFlight.current = false; });
   }, []);
 
   const loadCategories = React.useCallback(() => {

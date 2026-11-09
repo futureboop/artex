@@ -4,6 +4,7 @@
 // are passed through and formatted at the call site.
 
 import type { ChatMention } from "@/lib/chat-mentions";
+import { auth } from "@/lib/auth";
 import { MOCK } from "@/lib/mock/enabled";
 import type {
   ActiveFindingRetest,
@@ -106,8 +107,7 @@ import type {
 } from "@/lib/types";
 
 function getToken(): string | null {
-  if (typeof window === "undefined") return null;
-  return localStorage.getItem("artex_token");
+  return auth.getToken();
 }
 
 export async function http<T>(path: string, init?: RequestInit): Promise<T> {
