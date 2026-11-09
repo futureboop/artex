@@ -1,10 +1,12 @@
 package db
 
 import (
+	"context"
 	"net/url"
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // directTaskContextCTE is the current task plus exactly its explicitly related
@@ -199,7 +201,13 @@ ORDER BY target.id LIMIT $`+limitPosition+` OFFSET $`+offsetPosition, pageArgs..
 // used for destructive task cleanup; HostsByTask intentionally retains that
 // narrower, task-owned behavior.
 func (s *AssetStore) HostsByTaskWithSources(taskID int64) ([]string, error) {
-	rows, err := s.db.Query(`WITH `+directTaskContextCTE+`,
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	rows, err := s.db.QueryContext(ctx, `WITH `+directTaskContextCTE+`,
+context_scopes AS MATERIALIZED (
+  SELECT ts.* FROM task_scope ts
+  JOIN context_tasks ctx ON ctx.task_id=ts.task_id
+),
 context_assets AS (
   SELECT DISTINCT a.id
   FROM assets a
@@ -210,19 +218,23 @@ context_assets AS (
   JOIN exploration_nodes en ON en.id=ea.node_id
   JOIN context_tasks ctx ON ctx.exploration_id=en.exploration_id
   UNION
-  SELECT DISTINCT a.id
-  FROM assets a
-  JOIN task_scope ts ON (
-       (ts.kind='company'     AND a.company_id=ts.company_id)
-    OR (ts.kind='root_domain' AND a.root_domain=ts.domain)
-    OR (ts.kind='subdomain'   AND a.domain=ts.domain)
-    OR (ts.kind IN ('ip','cidr') AND ts.net >>= try_inet(a.ip))
-    OR (ts.kind='icp' AND (
-         lower(regexp_replace(COALESCE(a.icp,''), '[[:space:]]+', '', 'g')) = ts.value
-         OR lower(regexp_replace(COALESCE(a.app_icp,''), '[[:space:]]+', '', 'g')) = ts.value
-       ))
-  )
-  JOIN context_tasks ctx ON ctx.task_id=ts.task_id
+  SELECT a.id FROM context_scopes ts
+  JOIN assets a ON a.company_id=ts.company_id WHERE ts.kind='company'
+  UNION
+  SELECT a.id FROM context_scopes ts
+  JOIN assets a ON a.root_domain=ts.domain WHERE ts.kind='root_domain'
+  UNION
+  SELECT a.id FROM context_scopes ts
+  JOIN assets a ON a.domain=ts.domain WHERE ts.kind='subdomain'
+  UNION
+  SELECT a.id FROM context_scopes ts
+  JOIN assets a ON ts.net >>= try_inet(a.ip) WHERE ts.kind IN ('ip','cidr')
+  UNION
+  SELECT a.id FROM context_scopes ts
+  JOIN assets a ON (
+    lower(regexp_replace(COALESCE(a.icp,''), '[[:space:]]+', '', 'g')) = ts.value
+    OR lower(regexp_replace(COALESCE(a.app_icp,''), '[[:space:]]+', '', 'g')) = ts.value
+  ) WHERE ts.kind='icp'
 )
 SELECT COALESCE(a.domain,''), COALESCE(a.ip,''), COALESCE(a.url,'')
 FROM assets a JOIN context_assets ctx ON ctx.id=a.id`, taskID)
