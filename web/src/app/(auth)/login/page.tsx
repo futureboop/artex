@@ -11,7 +11,7 @@ import { Checkbox } from "@/components/ui/checkbox";
 import { Dialog, DialogClose, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { api } from "@/lib/api";
+import { authStatus, login } from "@/lib/auth-api";
 import { auth } from "@/lib/auth";
 
 export default function LoginPage() {
@@ -19,7 +19,6 @@ export default function LoginPage() {
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
-  const [checking, setChecking] = useState(true);
   const [agreed, setAgreed] = useState(false);
   const [termsOpen, setTermsOpen] = useState(false);
   const [readToEnd, setReadToEnd] = useState(false);
@@ -50,13 +49,11 @@ export default function LoginPage() {
       window.location.replace("/function/tasks");
       return;
     }
-    api
-      .authStatus()
+    authStatus()
       .then(({ initialized }) => {
         if (!initialized) router.replace("/setup");
       })
-      .catch(() => setError("无法连接到后端服务"))
-      .finally(() => setChecking(false));
+      .catch(() => setError("无法连接到后端服务"));
   }, [router]);
 
   async function handleSubmit(e: React.FormEvent) {
@@ -68,7 +65,7 @@ export default function LoginPage() {
     setLoading(true);
     setError("");
     try {
-      const { token } = await api.login("ARTEX", password);
+      const { token } = await login(password);
       auth.setToken(token);
       window.location.replace("/function/tasks");
     } catch {
@@ -76,14 +73,6 @@ export default function LoginPage() {
     } finally {
       setLoading(false);
     }
-  }
-
-  if (checking) {
-    return (
-      <div role="status" className="flex min-h-dvh items-center justify-center text-muted-foreground">
-        正在检查登录状态…
-      </div>
-    );
   }
 
   return (

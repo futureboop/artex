@@ -3,7 +3,11 @@
 import type { ReactNode } from "react";
 import * as React from "react";
 
+import { Toaster } from "@/components/ui/sonner";
+import { TooltipProvider } from "@/components/ui/tooltip";
 import { auth } from "@/lib/auth";
+import { PREFERENCE_DEFAULTS } from "@/lib/preferences/preferences-config";
+import { PreferencesStoreProvider } from "@/stores/preferences/preferences-provider";
 import { AuthenticatedShell } from "./_components/authenticated-shell";
 
 function StartupStatus({ message }: { message: string }) {
@@ -37,5 +41,20 @@ export default function Layout({ children }: Readonly<{ children: ReactNode }>) 
   }, []);
 
   // Static export cannot read browser credentials while rendering HTML.
-  return authed ? <AuthenticatedShell>{children}</AuthenticatedShell> : <StartupStatus message="正在检查登录状态…" />;
+  if (!authed) return <StartupStatus message="正在检查登录状态…" />;
+  const { theme_mode, theme_preset, content_layout, navbar_style, font } = PREFERENCE_DEFAULTS;
+  return (
+    <TooltipProvider>
+      <PreferencesStoreProvider
+        themeMode={theme_mode}
+        themePreset={theme_preset}
+        contentLayout={content_layout}
+        navbarStyle={navbar_style}
+        font={font}
+      >
+        <AuthenticatedShell>{children}</AuthenticatedShell>
+        <Toaster />
+      </PreferencesStoreProvider>
+    </TooltipProvider>
+  );
 }
