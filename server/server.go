@@ -2896,6 +2896,9 @@ func activitySessionStore(t *Task, filter db.ActivitySessionFilter) (*db.Explora
 // it to open the single task SSE at since=snapshot_cursor so history (id<=cursor) and
 // the live tail (id>cursor) meet with no gap and no overlap.
 func (s *Server) activityHistory(w http.ResponseWriter, r *http.Request) {
+	started := time.Now()
+	poolBefore := s.m.PG().Stats()
+	readPoolBefore := s.m.PG().InteractiveRead().Stats()
 	t := s.m.ResolveTask(r.URL.Query().Get("task"))
 	if t == nil {
 		writeErr(w, 404, "task not found")
@@ -2911,8 +2914,10 @@ func (s *Server) activityHistory(w http.ResponseWriter, r *http.Request) {
 	var mainSessions []db.MainSession
 	currentMainSeg := 0
 	var err error
+	readDB := s.m.PG().InteractiveRead()
+	readStore := readDB.Exploration(t.ExpID)
 	if filter.Main && filter.MainSeg == nil { // bare "main" → the current segment
-		mainSessions, err = t.Store.ListMainSessions()
+		mainSessions, err = readStore.ListMainSessions()
 		if err != nil {
 			writeErr(w, 500, err.Error())
 			return
@@ -2922,6 +2927,7 @@ func (s *Server) activityHistory(w http.ResponseWriter, r *http.Request) {
 		}
 		filter.MainSeg = &currentMainSeg
 	}
+	sessionsReady := time.Now()
 	before := int64(atoiDefault(q.Get("before"), 0))
 	limit := min(atoiDefault(q.Get("limit"), 200), 500) // cap so one request can't pull an unbounded slice
 	store, sourceTaskID, err := activitySessionStore(t, filter)
@@ -2933,14 +2939,17 @@ func (s *Server) activityHistory(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 404, "session not found")
 		return
 	}
+	store = readDB.Exploration(store.ID())
+	storeReady := time.Now()
 	// The browser tails only this task's broadcaster. Keep the SSE join cursor
 	// local even when the opened worker transcript comes from a related task.
-	snapshot, err := t.Store.ActivityMaxID()
+	snapshot, err := readStore.ActivityMaxID()
 	if err != nil {
 		log.Printf("[activity/history] task=%s session=%s snapshot: %v", t.ID, sess, err)
 		writeErr(w, 500, err.Error())
 		return
 	}
+	snapshotReady := time.Now()
 	var items []db.Activity
 	var hasMore bool
 	if sourceTaskID > 0 {
@@ -2955,6 +2964,7 @@ func (s *Server) activityHistory(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 500, err.Error())
 		return
 	}
+	pageReady := time.Now()
 	if sourceTaskID > 0 {
 		for i := range items {
 			items[i].SourceTaskID = sourceTaskID
@@ -2975,6 +2985,13 @@ func (s *Server) activityHistory(w http.ResponseWriter, r *http.Request) {
 		response["main_sessions"] = mainSessions
 		response["current_main_seg"] = currentMainSeg
 	}
+	poolAfter := s.m.PG().Stats()
+	readPoolAfter := s.m.PG().InteractiveRead().Stats()
+	w.Header().Set("Server-Timing", fmt.Sprintf("sessions;dur=%.1f,source;dur=%.1f,cursor;dur=%.1f,page;dur=%.1f,total;dur=%.1f,pool;desc=\"inuse=%d idle=%d wait=%d\",readpool;desc=\"inuse=%d idle=%d wait=%d\"",
+		sessionsReady.Sub(started).Seconds()*1000, storeReady.Sub(sessionsReady).Seconds()*1000,
+		snapshotReady.Sub(storeReady).Seconds()*1000, pageReady.Sub(snapshotReady).Seconds()*1000,
+		time.Since(started).Seconds()*1000, poolAfter.InUse, poolAfter.Idle, poolAfter.WaitCount-poolBefore.WaitCount,
+		readPoolAfter.InUse, readPoolAfter.Idle, readPoolAfter.WaitCount-readPoolBefore.WaitCount))
 	writeJSON(w, 200, response)
 }
 
