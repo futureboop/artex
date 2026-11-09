@@ -2531,12 +2531,13 @@ func (s *Server) intents(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 200, []any{})
 		return
 	}
+	readStore := s.m.PG().InteractiveRead().Exploration(t.ExpID)
 	q := r.URL.Query()
 	limit := min(atoiDefault(q.Get("limit"), 300), 500)
 	// No paging params → preserve the legacy bare-array response so existing callers
 	// (and the poll) keep working unchanged.
 	if q.Get("before") == "" && q.Get("page") == "" {
-		in, err := t.Store.ListByKind(db.KindIntent, limit)
+		in, err := readStore.ListByKind(db.KindIntent, limit)
 		if err != nil {
 			log.Printf("[intents] task=%s limit=%d: %v", t.ID, limit, err)
 			writeErr(w, 500, err.Error())
@@ -2550,13 +2551,13 @@ func (s *Server) intents(w http.ResponseWriter, r *http.Request) {
 	// also includes immutable intent results from directly related tasks; those
 	// rows never participate in this task's frontier or claim path.
 	before := int64(atoiDefault(q.Get("before"), 0))
-	in, hasMore, err := taskIntentHistoryPage(t.Store, before, limit, false, 0)
+	in, hasMore, err := taskIntentHistoryPage(readStore, before, limit, false, 0)
 	if err != nil {
 		log.Printf("[intents] task=%s before=%d limit=%d: %v", t.ID, before, limit, err)
 		writeErr(w, 500, err.Error())
 		return
 	}
-	sources, err := t.Store.DirectSourceStores()
+	sources, err := readStore.DirectSourceStores()
 	if err != nil {
 		writeErr(w, 500, err.Error())
 		return
