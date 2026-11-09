@@ -49,6 +49,8 @@ type Server struct {
 	jwtMu        sync.RWMutex
 	listReadyMu  sync.Mutex
 	listReady    taskListReadySnapshot
+	listDataMu   sync.Mutex
+	listData     taskListAggregateSnapshot
 	loginLimiter loginRateLimiter
 
 	// concMu serializes concurrency-cap decisions (admission + reconcile) so a
@@ -258,6 +260,9 @@ func New(ctx context.Context, m *Manager, skillDir string, dataDir string, keyDi
 		log.Printf("[engine] no LLM provider configured — engine idle until set via /api/llm or env")
 	}
 	s.restoreTaskRuntimes()
+	// Prime the task-list aggregates while the server starts. Requests can use
+	// the latest completed snapshot without waiting behind busy worker queries.
+	s.taskListAggregates()
 	go s.reconcileConcurrency()
 	s.startTaskArchiveWorker()
 	s.wireInterceptReviewer() // LLM 兜底审批:未命中拦截规则的命令交给模型判定
@@ -1059,23 +1064,8 @@ func (s *Server) listTasks(w http.ResponseWriter, r *http.Request) {
 	}
 	list := s.m.List()
 	listed := time.Now()
-	var metrics map[int64]db.TaskListMetrics
-	var archiveBlockers map[int64]int64
-	var metricDuration, archiveDuration time.Duration
-	var reads sync.WaitGroup
-	reads.Add(2)
-	go func() {
-		defer reads.Done()
-		begin := time.Now()
-		metrics, _ = s.m.PG().TaskListMetricsAll()
-		metricDuration = time.Since(begin)
-	}()
-	go func() {
-		defer reads.Done()
-		begin := time.Now()
-		archiveBlockers, _ = s.m.PG().TaskArchiveBlockers()
-		archiveDuration = time.Since(begin)
-	}()
+	metrics, archiveBlockers := s.taskListAggregates()
+	aggregatesReady := time.Now()
 	readyForList := s.taskListReadiness()
 	dtos := make([]TaskDTO, 0, len(list))
 	for _, t := range list {
@@ -1083,7 +1073,6 @@ func (s *Server) listTasks(w http.ResponseWriter, r *http.Request) {
 		dtos = append(dtos, dto)
 	}
 	statusReady := time.Now()
-	reads.Wait()
 	for i, t := range list {
 		dto := &dtos[i]
 		applyTaskArchiveBlocker(dto, archiveBlockers)
@@ -1106,11 +1095,61 @@ func (s *Server) listTasks(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	assembled := time.Now()
-	w.Header().Set("Server-Timing", fmt.Sprintf("tasks;dur=%.1f,metrics;dur=%.1f,archive;dur=%.1f,status;dur=%.1f,total;dur=%.1f",
-		listed.Sub(started).Seconds()*1000, metricDuration.Seconds()*1000,
-		archiveDuration.Seconds()*1000, statusReady.Sub(listed).Seconds()*1000,
+	w.Header().Set("Server-Timing", fmt.Sprintf("tasks;dur=%.1f,aggregates;dur=%.1f,status;dur=%.1f,total;dur=%.1f",
+		listed.Sub(started).Seconds()*1000, aggregatesReady.Sub(listed).Seconds()*1000,
+		statusReady.Sub(aggregatesReady).Seconds()*1000,
 		assembled.Sub(started).Seconds()*1000))
 	writeJSON(w, 200, map[string]any{"tasks": dtos, "active": active})
+}
+
+type taskListAggregateSnapshot struct {
+	metrics    map[int64]db.TaskListMetrics
+	blockers   map[int64]int64
+	expires    time.Time
+	refreshing bool
+}
+
+// Task-list counters are display data. Keep the last successful snapshot while
+// a background refresh runs so a saturated DB pool cannot hold up navigation.
+// The dashboard uses its own live endpoints and is unaffected.
+func (s *Server) taskListAggregates() (map[int64]db.TaskListMetrics, map[int64]int64) {
+	s.listDataMu.Lock()
+	if !s.listData.refreshing && time.Now().After(s.listData.expires) {
+		s.listData.refreshing = true
+		go func() {
+			var metrics map[int64]db.TaskListMetrics
+			var blockers map[int64]int64
+			var metricsErr, blockersErr error
+			var reads sync.WaitGroup
+			reads.Add(2)
+			go func() {
+				defer reads.Done()
+				metrics, metricsErr = s.m.PG().TaskListMetricsAll()
+			}()
+			go func() {
+				defer reads.Done()
+				blockers, blockersErr = s.m.PG().TaskArchiveBlockers()
+			}()
+			reads.Wait()
+			s.listDataMu.Lock()
+			if metricsErr == nil {
+				s.listData.metrics = metrics
+			}
+			if blockersErr == nil {
+				s.listData.blockers = blockers
+			}
+			if metricsErr == nil && blockersErr == nil {
+				s.listData.expires = time.Now().Add(10 * time.Second)
+			} else {
+				s.listData.expires = time.Now().Add(time.Second)
+			}
+			s.listData.refreshing = false
+			s.listDataMu.Unlock()
+		}()
+	}
+	metrics, blockers := s.listData.metrics, s.listData.blockers
+	s.listDataMu.Unlock()
+	return metrics, blockers
 }
 
 // taskListReadiness resolves the two role bindings and global provider once per
