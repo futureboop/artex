@@ -47,6 +47,8 @@ type Server struct {
 	jwtKey       []byte // HS256 signing key loaded from / generated into keyDir/jwt.key
 	jwtKeyPath   string
 	jwtMu        sync.RWMutex
+	listReadyMu  sync.Mutex
+	listReady    taskListReadySnapshot
 	loginLimiter loginRateLimiter
 
 	// concMu serializes concurrency-cap decisions (admission + reconcile) so a
@@ -1050,18 +1052,41 @@ func (s *Server) stats(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) listTasks(w http.ResponseWriter, r *http.Request) {
+	started := time.Now()
 	active := ""
 	if t := s.m.ActiveTask(); t != nil {
 		active = t.ID
 	}
 	list := s.m.List()
-	metrics, _ := s.m.PG().TaskListMetricsAll()
-	archiveBlockers, _ := s.m.PG().TaskArchiveBlockers()
+	listed := time.Now()
+	var metrics map[int64]db.TaskListMetrics
+	var archiveBlockers map[int64]int64
+	var metricDuration, archiveDuration time.Duration
+	var reads sync.WaitGroup
+	reads.Add(2)
+	go func() {
+		defer reads.Done()
+		begin := time.Now()
+		metrics, _ = s.m.PG().TaskListMetricsAll()
+		metricDuration = time.Since(begin)
+	}()
+	go func() {
+		defer reads.Done()
+		begin := time.Now()
+		archiveBlockers, _ = s.m.PG().TaskArchiveBlockers()
+		archiveDuration = time.Since(begin)
+	}()
 	readyForList := s.taskListReadiness()
 	dtos := make([]TaskDTO, 0, len(list))
 	for _, t := range list {
 		dto := taskDTO(t, s.resolvedTaskStatusWithReadiness(t, readyForList))
-		applyTaskArchiveBlocker(&dto, archiveBlockers)
+		dtos = append(dtos, dto)
+	}
+	statusReady := time.Now()
+	reads.Wait()
+	for i, t := range list {
+		dto := &dtos[i]
+		applyTaskArchiveBlocker(dto, archiveBlockers)
 		metric := metrics[t.ExpID]
 		dto.Tokens = tokenTotalDTO(metric.Tokens)
 		// prefer the live in-memory heartbeat (fresher) and fall back to the
@@ -1079,26 +1104,66 @@ func (s *Server) listTasks(w http.ResponseWriter, r *http.Request) {
 			Medium:   metric.Findings.Medium,
 			Low:      metric.Findings.Low,
 		}
-		dtos = append(dtos, dto)
 	}
+	assembled := time.Now()
+	w.Header().Set("Server-Timing", fmt.Sprintf("tasks;dur=%.1f,metrics;dur=%.1f,archive;dur=%.1f,status;dur=%.1f,total;dur=%.1f",
+		listed.Sub(started).Seconds()*1000, metricDuration.Seconds()*1000,
+		archiveDuration.Seconds()*1000, statusReady.Sub(listed).Seconds()*1000,
+		assembled.Sub(started).Seconds()*1000))
 	writeJSON(w, 200, map[string]any{"tasks": dtos, "active": active})
 }
 
 // taskListReadiness resolves the two role bindings and global provider once per
 // response. A list with many started tasks otherwise repeats the same database
 // lookups for every row. Task-specific active profiles are memoized by ID.
+type taskListReadySnapshot struct {
+	plannerBound bool
+	workerBound  bool
+	globalReady  bool
+	expires      time.Time
+	valid        bool
+	refreshing   bool
+}
+
+func (s *Server) readTaskListReady() taskListReadySnapshot {
+	compute := func() taskListReadySnapshot {
+		_, _, planner := s.agentBindingProvider("planner")
+		_, _, worker := s.agentBindingProvider("worker")
+		_, _, global := s.globalProvider()
+		return taskListReadySnapshot{plannerBound: planner, workerBound: worker, globalReady: global, expires: time.Now().Add(5 * time.Second), valid: true}
+	}
+	// In-memory test servers have no database and can change the global provider
+	// directly; keep their readiness checks immediate.
+	if s.m == nil || s.m.pg == nil {
+		return compute()
+	}
+	s.listReadyMu.Lock()
+	defer s.listReadyMu.Unlock()
+	if !s.listReady.valid {
+		s.listReady = compute()
+	} else if time.Now().After(s.listReady.expires) && !s.listReady.refreshing {
+		s.listReady.refreshing = true
+		go func() {
+			fresh := compute()
+			s.listReadyMu.Lock()
+			s.listReady = fresh
+			s.listReadyMu.Unlock()
+		}()
+	}
+	return s.listReady
+}
+
 func (s *Server) taskListReadiness() func(*Task) bool {
-	var initialized, plannerBound, workerBound, globalReady bool
+	var initialized bool
+	var roles taskListReadySnapshot
 	profileReady := make(map[int64]bool)
 	return func(t *Task) bool {
 		if !initialized {
-			_, _, plannerBound = s.agentBindingProvider("planner")
-			_, _, workerBound = s.agentBindingProvider("worker")
-			_, _, globalReady = s.globalProvider()
+			roles = s.readTaskListReady()
 			initialized = true
 		}
 		state := t.llmStateSnapshot()
-		unboundReady := globalReady
+		unboundReady := roles.globalReady
 		if len(state.ProfileIDs) > 0 {
 			unboundReady = false
 			if state.ActiveID != nil {
@@ -1111,7 +1176,7 @@ func (s *Server) taskListReadiness() func(*Task) bool {
 				unboundReady = ready
 			}
 		}
-		return (plannerBound || unboundReady) && (workerBound || unboundReady)
+		return (roles.plannerBound || unboundReady) && (roles.workerBound || unboundReady)
 	}
 }
 
