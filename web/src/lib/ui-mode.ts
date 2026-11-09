@@ -1,12 +1,10 @@
 export type UiMode = "classic" | "simple";
 
-// New key makes this rollout start in simple mode even for browsers that saved
-// the previous classic default. Switching to classic writes an explicit choice.
-const COOKIE_KEY = "artex_ui_mode_v2";
+const COOKIE_KEY = "artex_ui_mode";
 
 export function readUiMode(): UiMode {
-  if (typeof document === "undefined") return "simple";
-  return document.cookie.split("; ").some((part) => part === `${COOKIE_KEY}=classic`) ? "classic" : "simple";
+  if (typeof document === "undefined") return "classic";
+  return document.cookie.split("; ").some((part) => part === `${COOKIE_KEY}=simple`) ? "simple" : "classic";
 }
 
 export function saveUiMode(mode: UiMode) {
