@@ -276,13 +276,15 @@ function TaskDetailInner() {
         setTask(task);
         setPaused(task.paused ?? false);
         setLoaded(true);
+        return task;
       })
       .catch(() => {
         // Keep the last rendered task state during a transient poll failure.
+        return undefined;
       });
     // Stats can be slower than the task record. Let the page render as soon as
     // the task arrives, then enrich the live status without blocking navigation.
-    const statsRequest = taskRequest.then(() => terminalTask.current ? undefined : api
+    const statsRequest = taskRequest.then((task) => !task || terminalTask.current ? undefined : api
       .taskStats(id)
       .then((s) => {
         if (taskLoadInFlight.current !== id || !s.active_task) return;

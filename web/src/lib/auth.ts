@@ -14,18 +14,20 @@ export const auth = {
   getToken(): string | null {
     if (typeof window === "undefined") return null;
     // Mock demo：无真实登录，返回一个假 token 让路由守卫放行、直接进主界面。
-    const stored = localStorage.getItem(TOKEN_KEY);
-    if (stored) return stored;
     // A valid administrator cookie can outlive localStorage (for example after a
-    // browser storage cleanup). Let the backend verify it instead of forcing login.
+    // browser storage cleanup). Prefer it if both stores disagree: the backend
+    // prefers the Authorization header, so sending a stale stored token would
+    // otherwise invalidate a valid cookie session.
     const cookie = document.cookie.split("; ").find((part) => part.startsWith(`${TOKEN_KEY}=`));
     if (cookie) {
       try {
         return decodeURIComponent(cookie.slice(TOKEN_KEY.length + 1));
       } catch {
-        return null;
+        // Fall through to localStorage if an old cookie is malformed.
       }
     }
+    const stored = localStorage.getItem(TOKEN_KEY);
+    if (stored) return stored;
     return process.env.NEXT_PUBLIC_MOCK === "1" ? "mock-demo" : null;
   },
 

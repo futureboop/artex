@@ -1046,15 +1046,17 @@ export function SessionsTab({
 
   // ── worker (intent) session list — paged, poll first page lightly ───────────────
   React.useEffect(() => {
-    if (!historyReady) return;
     let active = true;
+    let inFlight = false;
     firstIntentsRef.current = [];
     setIntents([]);
     setOlderIntents([]);
     setFirstIntentsHasMore(false);
     setOlderIntentsHasMore(false);
-    const load = () =>
-      api
+    const load = () => {
+      if (inFlight) return;
+      inFlight = true;
+      void api
         .intentsPage(taskId, 0, INTENTS_PAGE)
         .then((r) => {
           if (!active) return;
@@ -1076,14 +1078,19 @@ export function SessionsTab({
         })
         .catch(() => {
           // Polling is best-effort; the next interval retries automatically.
-        });
-    void load();
+        })
+        .finally(() => { inFlight = false; });
+    };
+    // Give the main transcript a brief head start without making the Worker
+    // sidebar depend on its history request finishing successfully.
+    const first = setTimeout(load, 750);
     const t = setInterval(load, terminal ? 30_000 : 15_000);
     return () => {
       active = false;
+      clearTimeout(first);
       clearInterval(t);
     };
-  }, [taskId, historyReady, terminal]);
+  }, [taskId, terminal]);
 
   const loadOlderIntents = React.useCallback(() => {
     if (loadingOlderIntents) return;
