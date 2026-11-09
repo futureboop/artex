@@ -11,7 +11,9 @@ function StartupStatus({ message }: { message: string }) {
   return (
     <main className="flex min-h-dvh items-center justify-center bg-background px-6 text-foreground" role="status">
       <div className="flex w-full max-w-xs flex-col items-center gap-4 text-center">
-        <img src="/logo.png" alt="ARTEX" width={48} height={48} />
+        <span role="img" aria-label="ARTEX" className="text-5xl leading-none">
+          🛡️
+        </span>
         <div className="space-y-1">
           <p className="font-semibold">正在打开控制台</p>
           <p className="text-sm text-muted-foreground">{message}</p>

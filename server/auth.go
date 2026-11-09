@@ -2,6 +2,7 @@ package server
 
 import (
 	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"log"
 	"math/big"
@@ -10,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 
@@ -34,6 +36,82 @@ const (
 // 把"读不到"当成"没有设置"：authInit 曾因此在数据库报错时放行，让未认证请求覆盖
 // 掉已有的管理员密码。
 const errDataSourceUnavailable = "数据源暂时不可用，请稍后重试"
+
+// One administrator account exists. A process-wide budget bounds anonymous
+// bcrypt work even when requests arrive through a reverse proxy, where all
+// clients may share one RemoteAddr. The small burst lets a human retry a typo.
+type loginRateLimiter struct {
+	mu     sync.Mutex
+	tokens float64
+	last   time.Time
+	active int
+}
+
+func (l *loginRateLimiter) allow(now time.Time) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.last.IsZero() {
+		l.tokens = 5
+	} else if elapsed := now.Sub(l.last).Seconds(); elapsed > 0 {
+		l.tokens = min(5, l.tokens+elapsed/10)
+	}
+	l.last = now
+	if l.active >= 2 || l.tokens < 1 {
+		return false
+	}
+	l.tokens--
+	l.active++
+	return true
+}
+
+func (l *loginRateLimiter) done() {
+	l.mu.Lock()
+	l.active--
+	l.mu.Unlock()
+}
+
+func (s *Server) signToken() (string, error) {
+	s.jwtMu.RLock()
+	defer s.jwtMu.RUnlock()
+	return signJWT(s.jwtKey)
+}
+
+func (s *Server) verifyToken(token string) bool {
+	s.jwtMu.RLock()
+	defer s.jwtMu.RUnlock()
+	return verifyJWT(token, s.jwtKey)
+}
+
+// prepareJWTKey writes a new key beside the old one so the final rename is
+// atomic on Linux. Callers remove the temp file if the password update fails.
+func prepareJWTKey(path string) ([]byte, string, error) {
+	buf := make([]byte, 32)
+	if _, err := rand.Read(buf); err != nil {
+		return nil, "", err
+	}
+	key := []byte(hex.EncodeToString(buf))
+	if path == "" { // in-memory test servers
+		return key, "", nil
+	}
+	f, err := os.CreateTemp(filepath.Dir(path), ".jwt-key-*")
+	if err != nil {
+		return nil, "", err
+	}
+	defer f.Close()
+	if err := f.Chmod(0600); err != nil {
+		os.Remove(f.Name())
+		return nil, "", err
+	}
+	if _, err := f.Write(key); err != nil {
+		os.Remove(f.Name())
+		return nil, "", err
+	}
+	if err := f.Sync(); err != nil {
+		os.Remove(f.Name())
+		return nil, "", err
+	}
+	return key, f.Name(), nil
+}
 
 // validatePassword 返回空串表示通过，否则返回可直接展示给用户的中文原因。
 func validatePassword(pw string) string {
@@ -170,7 +248,7 @@ func (s *Server) requireAuth(h http.Handler) http.Handler {
 			writeErr(w, 401, "未授权")
 			return
 		}
-		if !verifyJWT(tok, s.jwtKey) {
+		if !s.verifyToken(tok) {
 			writeErr(w, 401, "token 无效或已过期")
 			return
 		}
@@ -238,7 +316,7 @@ func (s *Server) authInit(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 403, "密码已设置")
 		return
 	}
-	tok, err := signJWT(s.jwtKey)
+	tok, err := s.signToken()
 	if err != nil {
 		writeErr(w, 500, "token 生成失败")
 		return
@@ -254,7 +332,8 @@ func (s *Server) authChangePassword(w http.ResponseWriter, r *http.Request) {
 	if pg == nil {
 		return
 	}
-	if !verifyJWT(extractToken(r), s.jwtKey) {
+	currentToken := extractToken(r)
+	if !s.verifyToken(currentToken) {
 		writeErr(w, 401, "未授权")
 		return
 	}
@@ -272,6 +351,13 @@ func (s *Server) authChangePassword(w http.ResponseWriter, r *http.Request) {
 	}
 	if msg := validatePassword(req.NewPassword); msg != "" {
 		writeErr(w, 400, msg)
+		return
+	}
+	s.jwtMu.Lock()
+	defer s.jwtMu.Unlock()
+	// A second password change may have completed while this request was parsed.
+	if !verifyJWT(currentToken, s.jwtKey) {
+		writeErr(w, 401, "token 无效或已过期")
 		return
 	}
 	hash, ok, err := pg.GetSetting(authPassKey)
@@ -292,11 +378,34 @@ func (s *Server) authChangePassword(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 500, "密码加密失败")
 		return
 	}
+	newKey, tempPath, err := prepareJWTKey(s.jwtKeyPath)
+	if err != nil {
+		writeErr(w, 500, "准备会话更新失败")
+		return
+	}
+	if tempPath != "" {
+		defer os.Remove(tempPath)
+	}
 	if err := pg.SetSetting(authPassKey, string(newHash)); err != nil {
 		writeErr(w, 500, "保存失败: "+err.Error())
 		return
 	}
-	writeJSON(w, 200, map[string]any{"ok": true})
+	if tempPath != "" {
+		if err := os.Rename(tempPath, s.jwtKeyPath); err != nil {
+			if rollbackErr := pg.SetSetting(authPassKey, hash); rollbackErr != nil {
+				log.Printf("[auth] 密码更新后会话密钥轮换失败，且密码回滚失败: %v", rollbackErr)
+			}
+			writeErr(w, 500, "更新会话失败")
+			return
+		}
+	}
+	s.jwtKey = newKey
+	tok, err := signJWT(newKey)
+	if err != nil {
+		writeErr(w, 500, "token 生成失败")
+		return
+	}
+	writeJSON(w, 200, map[string]any{"ok": true, "token": tok})
 }
 
 // POST /api/auth/login — validates username/password and returns a JWT.
@@ -317,6 +426,17 @@ func (s *Server) authLogin(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 401, "用户名或密码错误")
 		return
 	}
+	if !s.loginLimiter.allow(time.Now()) {
+		w.Header().Set("Retry-After", "10")
+		writeErr(w, http.StatusTooManyRequests, "登录尝试过于频繁，请稍后重试")
+		return
+	}
+	defer s.loginLimiter.done()
+	// Keep password verification and token issuance on the same key generation.
+	// Otherwise a login that checked the old password could receive a fresh token
+	// after a concurrent password change rotated the key.
+	s.jwtMu.RLock()
+	defer s.jwtMu.RUnlock()
 	hash, ok, err := pg.GetSetting(authPassKey)
 	if err != nil {
 		writeErr(w, 503, errDataSourceUnavailable)

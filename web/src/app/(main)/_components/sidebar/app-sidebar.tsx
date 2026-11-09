@@ -22,7 +22,6 @@ import { NavMain } from "./nav-main";
 import { NavUser } from "./nav-user";
 import { SidebarSupportCard } from "./sidebar-support-card";
 
-
 export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
   const currentUser = useCurrentUser();
   const { sidebarVariant, sidebarCollapsible, isSynced } = usePreferencesStore(
@@ -44,7 +43,9 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
             <SidebarMenuButton asChild>
               <Link prefetch={false} href="/function/tasks">
                 {/* eslint-disable-next-line @next/next/no-img-element */}
-                <img src="/logo.png" alt="ARTEX" width={40} height={40} className="shrink-0" />
+                <span role="img" aria-label="ARTEX" className="shrink-0 text-3xl leading-none">
+                  🛡️
+                </span>
                 <span className="font-semibold text-base">{APP_CONFIG.name}</span>
               </Link>
             </SidebarMenuButton>

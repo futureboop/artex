@@ -68,7 +68,9 @@ export default function SetupPage() {
           <div className="absolute size-60 rounded-full border border-primary-foreground/15" />
           <div className="absolute size-40 rounded-full border border-primary-foreground/20" />
           {/* eslint-disable-next-line @next/next/no-img-element */}
-          <img src="/logo.png" alt="ARTEX" width={160} height={160} className="relative brightness-0 invert" />
+          <span role="img" aria-label="初始化设置" className="relative text-8xl leading-none">
+            🧭
+          </span>
         </div>
       </div>
 
@@ -76,6 +78,9 @@ export default function SetupPage() {
       <div className="flex w-full items-center justify-center bg-background p-8 lg:w-2/3">
         <div className="w-full max-w-md space-y-10 py-24 lg:py-32">
           <div className="space-y-4 text-center">
+            <span role="img" aria-label="初始化设置" className="inline-block text-5xl lg:hidden">
+              🧭
+            </span>
             <h2 className="text-2xl font-medium tracking-tight">{unavailable ? "无法确认初始化状态" : "初始化密码"}</h2>
             <p className="mx-auto max-w-xl text-muted-foreground">
               {unavailable

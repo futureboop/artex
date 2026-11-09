@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -162,6 +164,50 @@ func TestVerifyJWTRequiresExpectedClaimsAndAlgorithm(t *testing.T) {
 				t.Fatalf("verifyJWT() = %v, want %v", got, tc.want)
 			}
 		})
+	}
+}
+
+func TestLoginRateLimiterBoundsBcryptWork(t *testing.T) {
+	var limiter loginRateLimiter
+	now := time.Unix(1_000, 0)
+	if !limiter.allow(now) || !limiter.allow(now) || limiter.allow(now) {
+		t.Fatal("only two bcrypt checks may run concurrently")
+	}
+	limiter.done()
+	limiter.done()
+	for i := 0; i < 3; i++ {
+		if !limiter.allow(now) {
+			t.Fatalf("burst attempt %d was rejected", i)
+		}
+		limiter.done()
+	}
+	if limiter.allow(now) {
+		t.Fatal("the sixth login attempt should be rate limited")
+	}
+	if !limiter.allow(now.Add(10 * time.Second)) {
+		t.Fatal("one login attempt should be restored after ten seconds")
+	}
+	limiter.done()
+}
+
+func TestPreparedJWTKeyRevokesOldToken(t *testing.T) {
+	oldKey := []byte("old-test-key-with-at-least-32-characters")
+	oldToken, err := signJWT(oldKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), jwtKeyFilename)
+	key, tempPath, err := prepareJWTKey(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.Remove(tempPath)
+	if len(key) < 32 || tempPath == "" || verifyJWT(oldToken, key) {
+		t.Fatal("a replacement key must invalidate tokens signed by the old key")
+	}
+	newToken, err := signJWT(key)
+	if err != nil || !verifyJWT(newToken, key) {
+		t.Fatalf("replacement key did not sign a valid token: %v", err)
 	}
 }
 
