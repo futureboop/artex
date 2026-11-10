@@ -327,18 +327,17 @@ export default function SystemSettingsPage() {
           <CardHeader>
             <CardTitle className="flex items-center gap-2 text-base">
               <RadioTowerIcon className="size-4" />
-              全局代理
+              全局应用代理
             </CardTitle>
             <CardDescription>
-              所有 Agent 的<b>目标流量</b>经此代理出网（隐藏源 IP / 走跳板）。支持 <b>http / https / socks5</b>，可带{" "}
+              应用内支持代理的工具可通过这里配置的 <b>http / https / socks5</b> 出网，可带{" "}
               <code>user:pass</code> 认证。留空=直连。
               <br />
               开启<b>流量捕获</b>时，它作为记录代理的<b>上游</b>（流量仍全量落库，再经此代理出网）；关闭捕获时，直接注入
               Agent 的 bash / WebFetch 出网。与网络搜索代理、LLM 代理相互独立。
               <br />
-              <b>提示</b>：socks5 在<b>关闭捕获</b>时依赖各命令行工具对 <code>ALL_PROXY</code> 的支持（curl
-              可用，部分工具可能忽略）； 若主要用 socks5，建议开启流量捕获——此路径由 MITM
-              亲自拨号，工具无感知、稳定生效。
+              <b>命令和脚本可以忽略此设置。</b>需要强制所有 TCP/UDP 走代理时，请按仓库的
+              <code>egress/README.md</code> 启用透明出口部署，并在 Docker 的 <code>.env</code> 中配置代理。
             </CardDescription>
           </CardHeader>
           <CardContent className="flex flex-col gap-2">
@@ -359,7 +358,7 @@ export default function SystemSettingsPage() {
               </Button>
             </div>
             <p className="text-muted-foreground text-xs">
-              {globalProxyInput.trim() ? "已配置 · 所有目标流量经此代理出网" : "未配置 · 目标流量直连出网"}
+              {globalProxyInput.trim() ? "已配置应用层代理 · 此设置不约束命令和脚本" : "未配置应用层代理"}
             </p>
           </CardContent>
         </Card>

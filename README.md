@@ -93,6 +93,11 @@ docker compose up -d          # 拉取 autumn27/artex 镜像 + postgres
 
 镜像已含常用工具（ripgrep/curl/vim/npm/nmap…）；`./skills` 与 `./data` 以绑定挂载持久化。
 
+需要让 Agent 的命令和脚本统一从指定 SOCKS5 出口发送 TCP/UDP 时，使用
+[`compose.egress.yml`](compose.egress.yml) 的透明代理部署。配置与验证步骤见
+[`egress/README.md`](egress/README.md)。该模式要求上游代理支持 UDP ASSOCIATE；
+不支持的协议直接拒绝，代理不可用时不会回退到服务器直连。
+
 远程 MCP 可在系统设置中选择 `http`（Streamable HTTP）或 `sse`（旧版 SSE）。
 旧版 SSE 服务通常使用 `GET /sse` 建立事件流，再通过服务返回的
 `/message?sessionId=...` 接收 JSON-RPC 请求；配置时将 URL 填为 `/sse`，请求头按

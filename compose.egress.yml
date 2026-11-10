@@ -1,0 +1,99 @@
+# Opt-in, fail-closed transparent SOCKS5 egress for the ARTEX container.
+# The SOCKS5 server must support UDP ASSOCIATE. See egress/README.md.
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-artex}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?请在 .env 设置 POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB:-artex}
+    networks:
+      db_net:
+        ipv4_address: 172.28.224.2
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./egress/postgres-resolv.conf:/etc/resolv.conf:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-artex} -d ${POSTGRES_DB:-artex}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  egress:
+    build: ./egress
+    environment:
+      ARTEX_EGRESS_SOCKS5: ${ARTEX_EGRESS_SOCKS5:?请在 .env 设置 SOCKS5 代理 URL}
+      ARTEX_EGRESS_UDP_RELAY_IP: ${ARTEX_EGRESS_UDP_RELAY_IP:-}
+      ARTEX_EGRESS_DB_IP: 172.28.224.2
+      ARTEX_EGRESS_LOCAL_SUBNETS: 172.28.223.0/24,172.28.224.0/24
+    cap_drop: [ALL]
+    cap_add: [NET_ADMIN]
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    networks:
+      egress_net:
+        ipv4_address: 172.28.223.3
+        gw_priority: 1
+      db_net:
+        ipv4_address: 172.28.224.3
+    ports:
+      - "127.0.0.1:${ARTEX_RECORDING_PORT:-8788}:8788"
+    healthcheck:
+      test: ["CMD-SHELL", "pidof sing-box >/dev/null && nft list table inet artex_egress >/dev/null"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+    restart: unless-stopped
+
+  ingress:
+    image: nginx:1.30.6-alpine
+    depends_on:
+      - artex
+    networks:
+      egress_net:
+        ipv4_address: 172.28.223.4
+    ports:
+      - "${ARTEX_PUBLIC_PORT:-8787}:8787"
+    volumes:
+      - ./egress/nginx.conf:/etc/nginx/nginx.conf:ro
+    restart: unless-stopped
+
+  artex:
+    image: ${ARTEX_IMAGE:-autumn27/artex:latest}
+    network_mode: service:egress
+    depends_on:
+      postgres:
+        condition: service_healthy
+      egress:
+        condition: service_healthy
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    environment:
+      ARTEX_PG_DSN: postgres://${POSTGRES_USER:-artex}:${POSTGRES_PASSWORD}@172.28.224.2:5432/${POSTGRES_DB:-artex}?sslmode=disable
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      ARTEX_LLM_PROVIDER: ${ARTEX_LLM_PROVIDER:-}
+      ARTEX_LLM_MODEL: ${ARTEX_LLM_MODEL:-}
+      ARTEX_LLM_BASE_URL: ${ARTEX_LLM_BASE_URL:-}
+      ARTEX_LLM_PROXY: ${ARTEX_LLM_PROXY:-}
+    volumes:
+      - ./data:/app/data
+      - ./skills:/app/skills
+      - ./egress/resolv.conf:/etc/resolv.conf:ro
+    restart: unless-stopped
+
+networks:
+  egress_net:
+    ipam:
+      config:
+        - subnet: 172.28.223.0/24
+  db_net:
+    internal: true
+    ipam:
+      config:
+        - subnet: 172.28.224.0/24
+
+volumes:
+  pgdata:
