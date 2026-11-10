@@ -37,6 +37,9 @@ the same Compose project name/`pgdata` volume. Back up the database and data
 directory before switching Compose files. The transparent proxy is configured
 by `ARTEX_EGRESS_SOCKS5`; the web UI's **Global proxy** setting is a separate
 application-level HTTP proxy and should be left empty in this deployment.
+If the current Compose file mounts a separate JWT key at `/app/jwt.key`, add
+that same mount to `artex.volumes` in `compose.egress.yml` before switching so
+existing administrator sessions remain valid.
 
 ```sh
 docker compose -f compose.egress.yml config --quiet

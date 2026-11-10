@@ -67,7 +67,7 @@ services:
         condition: service_healthy
       egress:
         condition: service_healthy
-    cap_drop: [ALL]
+    cap_drop: [NET_RAW]
     security_opt:
       - no-new-privileges:true
     environment:
