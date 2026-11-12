@@ -168,6 +168,22 @@ export default function NotifyPage() {
       toast.error("请填写渠道名称");
       return;
     }
+    if (form.kind === "onebot11") {
+      const url = String(form.config.base_url ?? "").trim();
+      const targetId = String(form.config.target_id ?? "").trim();
+      if (!/^https?:\/\//i.test(url)) {
+        toast.error("请填写以 http:// 或 https:// 开头的 OneBot HTTP API 地址");
+        return;
+      }
+      if (form.config.target_type !== "group" && form.config.target_type !== "private") {
+        toast.error("请选择QQ群聊或个人 QQ");
+        return;
+      }
+      if (!/^[1-9]\d*$/.test(targetId)) {
+        toast.error("请填写纯数字的QQ群号或个人 QQ 号");
+        return;
+      }
+    }
     setSaving(true);
     try {
       const payload = {
@@ -201,7 +217,7 @@ export default function NotifyPage() {
     setTesting(true);
     try {
       const r = await api.notifyTestChannel(editing.id);
-      toast.success(`已发出测试消息（${r.latency_ms} ms），请到群里确认`);
+      toast.success(`已发出测试消息（${r.latency_ms} ms），请到接收目标确认`);
     } catch (e) {
       // 后端把渠道返回的原始错误如实回传，这是排查配置的唯一线索，原样展示。
       toast.error("测试失败：" + (e as Error).message, { duration: 12000 });
@@ -269,7 +285,7 @@ export default function NotifyPage() {
         <div>
           <h1 className="text-xl font-semibold tracking-tight">通知推送</h1>
           <p className="text-muted-foreground text-sm">
-            发现漏洞时推送到钉钉 / 飞书 / 企业微信等渠道 · 每个渠道可独立设推送时机与过滤规则
+            发现漏洞时推送到钉钉、飞书、企业微信、QQ 等渠道 · 每个渠道可独立设推送时机与过滤规则
           </p>
         </div>
         {meta && (
@@ -399,6 +415,11 @@ export default function NotifyPage() {
                     <Badge variant="outline">{ch.mode === "digest" ? "汇总" : "实时"}</Badge>
                     {!ch.enabled && <Badge variant="outline">已停用</Badge>}
                   </div>
+                  {ch.kind === "onebot11" && (
+                    <p className="text-muted-foreground text-sm">
+                      {ch.config.target_type === "group" ? "QQ群" : "个人 QQ"} · {String(ch.config.target_id ?? "未设置")}
+                    </p>
+                  )}
                   <FilterSummary filter={ch.filter} />
                 </CardContent>
               </Card>
@@ -429,7 +450,7 @@ export default function NotifyPage() {
                   value={form.kind}
                   onValueChange={(v) => {
                     // 换类型等于换一套凭据字段，不能把旧配置合并进来。
-                    setF({ kind: v, config: {} });
+                    setF({ kind: v, config: emptyForm(v).config });
                   }}
                   disabled={!!editing}
                 >
@@ -466,15 +487,24 @@ export default function NotifyPage() {
                   该渠道的表单尚未定义（前端缺 CHANNEL_FIELDS 条目），请补全后再试。
                 </p>
               ) : (
-                fields.map((d) => (
-                  <ConfigField
-                    key={d.key}
-                    def={d}
-                    value={form.config[d.key]}
-                    isSecret={secretKeys.has(d.key)}
-                    onChange={(v) => setCfg(d.key, v)}
-                  />
-                ))
+                fields.map((d) => {
+                  const def = form.kind === "onebot11" && d.key === "target_id"
+                    ? {
+                        ...d,
+                        label: form.config.target_type === "private" ? "个人 QQ 号" : "QQ群号",
+                        placeholder: form.config.target_type === "private" ? "输入个人 QQ 号" : "输入QQ群号",
+                      }
+                    : d;
+                  return (
+                    <ConfigField
+                      key={d.key}
+                      def={def}
+                      value={form.config[d.key]}
+                      isSecret={secretKeys.has(d.key)}
+                      onChange={(v) => setCfg(d.key, v)}
+                    />
+                  );
+                })
               )}
 
               <div className="grid gap-2">

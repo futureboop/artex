@@ -331,6 +331,101 @@ func TestNotifyChannelAPIMasksSecretsAndPreservesOnUpdate(t *testing.T) {
 	}
 }
 
+func TestNotifyOneBot11APIConfigAndSendToGroupThenPrivate(t *testing.T) {
+	f := newNotifyFixture(t)
+	type received struct {
+		path string
+		auth string
+		body map[string]any
+	}
+	requests := make(chan received, 2)
+	bot := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Errorf("OneBot 测试接收端解码失败: %v", err)
+		}
+		requests <- received{path: r.URL.Path, auth: r.Header.Get("Authorization"), body: body}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"status":"ok","retcode":0}`)
+	}))
+	defer bot.Close()
+
+	meta := f.request("GET", "/api/notify/meta", "")
+	if meta.Code != 200 || !strings.Contains(meta.Body.String(), `"kind":"onebot11"`) {
+		t.Fatalf("元数据里没有 OneBot 11: %d %s", meta.Code, meta.Body)
+	}
+	chID := f.createChannel(t, map[string]any{
+		"name": "QQ 推送测试", "kind": notify.KindOneBot11,
+		"config": map[string]any{
+			"base_url": bot.URL + "/onebot/v11", "target_type": "group",
+			"target_id": "123456", "access_token": "onebot-secret-123456",
+		},
+	})
+	listed := f.request("GET", "/api/notify/channels", "")
+	if listed.Code != 200 || strings.Contains(listed.Body.String(), "onebot-secret-123456") {
+		t.Fatalf("渠道列表失败或泄露 Token: %d %s", listed.Code, listed.Body)
+	}
+	var list struct {
+		Channels []struct {
+			ID         int64          `json:"id"`
+			Config     map[string]any `json:"config"`
+			SecretKeys []string       `json:"secret_keys"`
+		} `json:"channels"`
+	}
+	if err := json.Unmarshal(listed.Body.Bytes(), &list); err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, ch := range list.Channels {
+		if ch.ID != chID {
+			continue
+		}
+		found = true
+		if !notify.IsMasked(fmt.Sprint(ch.Config["access_token"])) || len(ch.SecretKeys) != 1 || ch.SecretKeys[0] != "access_token" {
+			t.Fatalf("OneBot Token 未按渠道声明掩码: %#v", ch)
+		}
+	}
+	if !found {
+		t.Fatal("新建的 OneBot 渠道未出现在列表")
+	}
+
+	if r := f.request("POST", fmt.Sprintf("/api/notify/channels/%d/test", chID), ""); r.Code != 200 {
+		t.Fatalf("OneBot 群聊测试发送失败: %d %s", r.Code, r.Body)
+	}
+	getRequest := func() received {
+		select {
+		case got := <-requests:
+			return got
+		case <-time.After(2 * time.Second):
+			t.Fatal("OneBot 测试端未收到请求")
+			return received{}
+		}
+	}
+	group := getRequest()
+	if group.path != "/onebot/v11/send_group_msg" || group.auth != "Bearer onebot-secret-123456" ||
+		group.body["group_id"] != float64(123456) || group.body["auto_escape"] != true {
+		t.Fatalf("群聊投递格式错误: %#v", group)
+	}
+	if !strings.Contains(fmt.Sprint(group.body["message"]), "测试消息") {
+		t.Fatalf("测试消息正文错误: %#v", group.body)
+	}
+
+	change, _ := json.Marshal(map[string]any{"config": map[string]any{
+		"target_type": "private", "target_id": "654321", "access_token": "new-onebot-token",
+	}})
+	if r := f.request("PATCH", fmt.Sprintf("/api/notify/channels/%d", chID), string(change)); r.Code != 200 {
+		t.Fatalf("改为私聊失败: %d %s", r.Code, r.Body)
+	}
+	if r := f.request("POST", fmt.Sprintf("/api/notify/channels/%d/test", chID), ""); r.Code != 200 {
+		t.Fatalf("OneBot 私聊测试发送失败: %d %s", r.Code, r.Body)
+	}
+	private := getRequest()
+	if private.path != "/onebot/v11/send_private_msg" || private.auth != "Bearer new-onebot-token" ||
+		private.body["user_id"] != float64(654321) || private.body["auto_escape"] != true {
+		t.Fatalf("私聊投递格式错误: %#v", private)
+	}
+}
+
 func (f *notifyFixture) channelConfig(t *testing.T, id int64) map[string]any {
 	t.Helper()
 	var cfg map[string]any

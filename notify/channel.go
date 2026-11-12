@@ -52,6 +52,7 @@ var registry = map[string]Channel{
 	KindWebhook:  webhookChannel{},
 	KindTelegram: telegramChannel{},
 	KindEmail:    emailChannel{},
+	KindOneBot11: oneBot11Channel{},
 }
 
 // Get 按类型取渠道实现。

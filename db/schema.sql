@@ -1303,16 +1303,17 @@ CREATE TRIGGER trg_task_intercept_rules_upd BEFORE UPDATE ON task_intercept_rule
 CREATE TABLE IF NOT EXISTS notification_channels (
     id           BIGSERIAL PRIMARY KEY,
     name         TEXT NOT NULL,
-    -- dingtalk 钉钉 / feishu 飞书 / wecom 企业微信 / webhook 通用 / telegram / email
+    -- dingtalk 钉钉 / feishu 飞书 / wecom 企业微信 / webhook 通用 / telegram / email / onebot11 QQ
     kind         TEXT NOT NULL,
     enabled      BOOLEAN NOT NULL DEFAULT true,
-    -- 凭据(明文存储，UI 掩码回显；见 server 侧 maskChannelSecrets)。六种渠道字段差异极大，
+    -- 凭据(明文存储，UI 掩码回显；见 server 侧 maskChannelSecrets)。七种渠道字段差异极大，
     -- 统一 JSONB + Go 侧按 kind 严格校验，避免为每渠道加一堆 NULL 列：
     --   dingtalk {webhook,secret}
     --   feishu   {webhook,secret}
     --   wecom    {webhook}
     --   webhook  {url,method,content_type,headers{},body_template}
     --   telegram {bot_token,chat_id,base_url}
+    --   onebot11 {base_url,target_type,target_id,access_token?}
     --   email    {host,port,username,password,from,to[],tls}
     config       JSONB NOT NULL DEFAULT '{}',
     -- 推送时机：realtime 命中即推 / digest 进批次按全局周期汇总成一条。

@@ -4,6 +4,11 @@
 
 ## [Unreleased]
 
+### 通知推送
+
+- 新增 OneBot 11 HTTP 通道，可选择发送到 QQ 群或个人 QQ 账号。每个渠道实例可配置 OneBot API 地址、目标类型、群号或 QQ 号，以及可选的 Access Token；沿用现有的实时/汇总、过滤、限流、测试发送和投递历史。
+- OneBot API 在本机环回地址运行时，需显式设置 `ARTEX_NOTIFY_ALLOW_LOCAL=1`；私网地址沿用现有通知投递策略。
+
 ## [0.3.15] - 2026-10-07
 
 ### 拦截

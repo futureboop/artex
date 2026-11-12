@@ -10,6 +10,7 @@ export const KIND_LABEL: Record<string, string> = {
   wecom: "企业微信",
   webhook: "通用 Webhook",
   telegram: "Telegram",
+  onebot11: "QQ · OneBot 11",
   email: "邮件",
 };
 
@@ -97,6 +98,37 @@ export const CHANNEL_FIELDS: Record<string, FieldDef[]> = {
       help: "留空用官方地址；自建 Bot API 反代时填写",
     },
   ],
+  onebot11: [
+    {
+      key: "base_url",
+      label: "OneBot HTTP API 地址",
+      kind: "text",
+      placeholder: "http://127.0.0.1:3000",
+      help: "填写 OneBot 11 的 HTTP API 根地址，可带路径前缀。本机环回地址需要在 ARTEX 服务端设置 ARTEX_NOTIFY_ALLOW_LOCAL=1 并重启。",
+    },
+    {
+      key: "target_type",
+      label: "接收对象",
+      kind: "select",
+      options: [
+        { value: "group", label: "QQ群聊" },
+        { value: "private", label: "个人 QQ" },
+      ],
+    },
+    {
+      key: "target_id",
+      label: "群号",
+      kind: "text",
+      placeholder: "输入QQ群号",
+      help: "发送漏洞通知与测试消息到这个目标；请填写纯数字号码。",
+    },
+    {
+      key: "access_token",
+      label: "Access Token",
+      kind: "password",
+      help: "OneBot HTTP API 开启访问令牌时填写，否则留空。",
+    },
+  ],
   email: [
     { key: "host", label: "SMTP 服务器", kind: "text", placeholder: "smtp.example.com" },
     {
@@ -143,7 +175,7 @@ export const emptyForm = (kind: string): ChannelForm => ({
   mode: "realtime",
   enabled: true,
   ratePerMin: "",
-  config: {},
+  config: kind === "onebot11" ? { target_type: "group" } : {},
   minSeverity: "",
   includeText: "",
   excludeText: "",

@@ -130,6 +130,12 @@ const respBodyLimit = 8 << 10
 // 错误分类是这个函数的核心职责：网络层失败与 5xx/408/429 归为「可重试」，
 // 其余 4xx 归为「永久失败」——重试一个 403 只是把同一个错误刷 3 遍日志。
 func doJSON(ctx context.Context, method, url string, headers map[string]string, payload any) ([]byte, error) {
+	return doJSONWithClient(ctx, httpClient, method, url, headers, payload)
+}
+
+// doJSONWithClient allows channels that carry a bearer token in an HTTP header
+// to disable redirects without changing the redirect policy of older channels.
+func doJSONWithClient(ctx context.Context, client *http.Client, method, url string, headers map[string]string, payload any) ([]byte, error) {
 	var body io.Reader
 	if payload != nil {
 		raw, err := json.Marshal(payload)
@@ -151,7 +157,7 @@ func doJSON(ctx context.Context, method, url string, headers map[string]string, 
 	for k, v := range headers {
 		req.Header.Set(k, v)
 	}
-	resp, err := httpClient.Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
 		// 连接被拒、DNS 失败、超时——多为瞬时故障，交给退避重试。
 		//

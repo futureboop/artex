@@ -21,6 +21,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -174,7 +175,7 @@ private fun JsonResourceScreen(feature: FeatureDestination, api: ArtexApi, onBac
                     Spacer(Modifier.height(8.dp))
                 }
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Button(onClick = { editing = null; editorOpen = true }, shape = RoundedCornerShape(9.dp)) {
+                    Button(onClick = { editing = null; error = null; editorOpen = true }, shape = RoundedCornerShape(9.dp)) {
                         Text("新增")
                     }
                     if (feature == FeatureDestination.NOTIFY) OutlinedButton(onClick = {
@@ -216,7 +217,11 @@ private fun JsonResourceScreen(feature: FeatureDestination, api: ArtexApi, onBac
                         val subtitle = when (feature) {
                             FeatureDestination.MCP -> "${row.optString("transport")} · ${row.optString("url").ifBlank { row.optString("command") }}"
                             FeatureDestination.TOOLS -> if (systemTool) "内置工具" else "${row.optString("kind")} · 自定义工具"
-                            FeatureDestination.NOTIFY -> "${row.optString("kind")} · ${row.optString("mode")}"
+                            FeatureDestination.NOTIFY -> if (row.optString("kind") == "onebot11") {
+                                val config = row.optJSONObject("config")
+                                val recipient = if (config?.optString("target_type") == "group") "QQ群" else "个人QQ"
+                                "OneBot 11 · $recipient ${config?.optString("target_id").orEmpty()} · ${row.optString("mode")}"
+                            } else "${row.optString("kind")} · ${row.optString("mode")}"
                             FeatureDestination.INTERCEPT -> "${row.optString("action")} · ${row.optString("pattern")}"
                             else -> "${row.optString("kind")} · ${row.optString("note")}"
                         }
@@ -227,7 +232,7 @@ private fun JsonResourceScreen(feature: FeatureDestination, api: ArtexApi, onBac
                         }
                         Spacer(Modifier.height(7.dp))
                         Row(horizontalArrangement = Arrangement.spacedBy(2.dp)) {
-                            TextButton(onClick = { editing = row; editorOpen = true }) { Text("编辑") }
+                            TextButton(onClick = { editing = row; error = null; editorOpen = true }) { Text("编辑") }
                             if (feature == FeatureDestination.MCP || feature == FeatureDestination.NOTIFY ||
                                 (feature == FeatureDestination.TOOLS && systemTool)) {
                                 TextButton(onClick = {
@@ -281,7 +286,7 @@ private fun JsonResourceScreen(feature: FeatureDestination, api: ArtexApi, onBac
         }
     }
 
-    if (editorOpen) ResourceEditorDialog(feature, spec, editing, extra, busy,
+    if (editorOpen) ResourceEditorDialog(feature, spec, editing, extra, busy, error,
         onDismiss = { editorOpen = false },
         onSave = { body ->
             scope.launch {
@@ -447,7 +452,7 @@ private fun JudgeConfigDialog(original: JSONObject, busy: Boolean, onDismiss: ()
 
 @Composable
 private fun ResourceEditorDialog(feature: FeatureDestination, spec: AdminResourceSpec,
-                                 original: JSONObject?, options: List<String>, busy: Boolean, onDismiss: () -> Unit,
+                                 original: JSONObject?, options: List<String>, busy: Boolean, serverError: String?, onDismiss: () -> Unit,
                                  onSave: (JSONObject) -> Unit) {
     val values = remember(feature, original) {
         mutableStateMapOf<String, String>().apply {
@@ -467,12 +472,24 @@ private fun ResourceEditorDialog(feature: FeatureDestination, spec: AdminResourc
                         Text("工具键：${original.optString("key")}", color = AdminMuted, fontSize = 12.sp)
                     } else if (feature != FeatureDestination.TOOLS || original?.optBoolean("system") != true ||
                         field.key !in setOf("kind", "exec", "deferred")) {
-                        val displayed = if (feature == FeatureDestination.NOTIFY && field.key == "kind" && options.isNotEmpty())
-                            field.copy(kind = AdminFieldKind.CHOICE, choices = options) else field
-                        AdminFormField(displayed, values[field.key].orEmpty()) { values[field.key] = it }
+                        if (feature == FeatureDestination.NOTIFY && field.key == "config" && values["kind"] == "onebot11") {
+                            OneBotConfigFields(values[field.key].orEmpty(), original) { key, value ->
+                                val latest = runCatching { JSONObject(values["config"].orEmpty()) }.getOrDefault(JSONObject())
+                                values["config"] = latest.put(key, value).toString()
+                            }
+                        } else {
+                            val displayed = if (feature == FeatureDestination.NOTIFY && field.key == "kind" && options.isNotEmpty())
+                                field.copy(kind = AdminFieldKind.CHOICE, choices = options) else field
+                            AdminFormField(displayed, values[field.key].orEmpty()) {
+                                if (feature == FeatureDestination.NOTIFY && field.key == "kind" && values[field.key] != it)
+                                    values["config"] = "{}"
+                                values[field.key] = it
+                            }
+                        }
                     }
                 }
                 feedback?.let { Text(it, color = AdminDanger, fontSize = 12.sp) }
+                serverError?.let { Text(it, color = AdminDanger, fontSize = 12.sp) }
             }
         },
         confirmButton = {
@@ -496,10 +513,66 @@ private fun ResourceEditorDialog(feature: FeatureDestination, spec: AdminResourc
                         throw IllegalArgumentException("请填写工具键")
                     if (feature == FeatureDestination.NOTIFY && (body.optString("name").isBlank() || body.optString("kind").isBlank()))
                         throw IllegalArgumentException("请填写渠道名称和类型")
+                    if (feature == FeatureDestination.NOTIFY && body.optString("kind") == "onebot11") {
+                        val config = body.getJSONObject("config")
+                        if (config.optString("target_type").isBlank()) config.put("target_type", "group")
+                        if (config.optString("base_url").isBlank()) throw IllegalArgumentException("请填写 OneBot API 地址")
+                        if (config.optString("target_type") !in setOf("group", "private"))
+                            throw IllegalArgumentException("请选择群聊或个人QQ")
+                        val target = config.optString("target_id")
+                        if (!target.matches(Regex("[1-9][0-9]*"))) throw IllegalArgumentException("请填写有效的群号或QQ号")
+                        val previous = original?.takeIf { it.optString("kind") == "onebot11" }?.optJSONObject("config")
+                        val destinationChanged = previous != null && listOf("base_url", "target_type", "target_id")
+                            .any { config.optString(it) != previous.optString(it) }
+                        if (destinationChanged && !config.has("access_token")) config.put("access_token", "")
+                        if (destinationChanged && config.optString("access_token").startsWith("__masked__"))
+                            throw IllegalArgumentException("接收目标已变更，请重新填写访问令牌或明确清除")
+                    }
                     onSave(body)
                 } catch (t: Exception) { feedback = t.message ?: "输入有误" }
             }, enabled = !busy) { Text("保存") }
         }, dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } })
+}
+
+@Composable
+private fun OneBotConfigFields(value: String, original: JSONObject?, onChange: (String, String) -> Unit) {
+    val config = remember(value) { runCatching { JSONObject(value) }.getOrDefault(JSONObject()) }
+    val targetType = config.optString("target_type").ifBlank { "group" }
+    val originalToken = original?.takeIf { it.optString("kind") == "onebot11" }
+        ?.optJSONObject("config")?.optString("access_token").orEmpty()
+    val token = config.optString("access_token")
+    val masked = token.startsWith("__masked__")
+
+    Text("OneBot 11 接收配置", color = AdminInk, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+    AdminTextField("OneBot API 地址", config.optString("base_url"),
+        { onChange("base_url", it) }, KeyboardType.Uri)
+    Text("填写 ARTEX 服务器可访问的 HTTP(S) API 地址。服务端访问本机地址时需启用 ARTEX_NOTIFY_ALLOW_LOCAL=1。",
+        color = AdminMuted, fontSize = 11.sp, lineHeight = 16.sp)
+    Column {
+        Text("发送到", color = AdminInk, fontSize = 12.sp, fontWeight = FontWeight.Medium)
+        Spacer(Modifier.height(5.dp))
+        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            FilterChip(selected = targetType == "group", onClick = { onChange("target_type", "group") },
+                label = { Text("QQ群") }, shape = RoundedCornerShape(7.dp))
+            FilterChip(selected = targetType == "private", onClick = { onChange("target_type", "private") },
+                label = { Text("个人QQ") }, shape = RoundedCornerShape(7.dp))
+        }
+    }
+    AdminTextField(if (targetType == "group") "群号" else "QQ号", config.optString("target_id"),
+        { onChange("target_id", it) }, KeyboardType.Number)
+    Column {
+        Text("访问令牌（可选）", color = AdminInk, fontSize = 12.sp, fontWeight = FontWeight.Medium)
+        Spacer(Modifier.height(5.dp))
+        OutlinedTextField(value = if (masked) "" else token, onValueChange = { onChange("access_token", it) },
+            modifier = Modifier.fillMaxWidth(), singleLine = true,
+            placeholder = { Text(if (masked) "已设置，留空保留" else "未设置") },
+            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+            visualTransformation = PasswordVisualTransformation(),
+            shape = RoundedCornerShape(8.dp), textStyle = LocalTextStyle.current.copy(fontSize = 13.sp))
+        if (masked) TextButton(onClick = { onChange("access_token", "") }) { Text("清除已保存的令牌") }
+        else if (originalToken.startsWith("__masked__") && token.isBlank())
+            Text("令牌将在保存后清除", color = AdminMuted, fontSize = 11.sp)
+    }
 }
 
 @Composable
