@@ -25,7 +25,7 @@ class SessionStore(private val context: Context) {
     val wallpaperDim: Float get() = prefs.getFloat("wallpaper_dim", 0.68f)
 
     fun setWallpaperDim(value: Float) {
-        prefs.edit().putFloat("wallpaper_dim", value.coerceIn(0.25f, 0.9f)).apply()
+        prefs.edit().putFloat("wallpaper_dim", value.coerceIn(0.65f, 0.95f)).apply()
     }
 
     fun token(): String? {

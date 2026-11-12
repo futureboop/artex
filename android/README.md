@@ -1,11 +1,21 @@
 # ARTEX Android
 
-原生 Android 客户端，使用现有 ARTEX `/api/*` 接口，不要求改动服务器。首页优先读取任务列表；发现和对话在打开对应页面时加载，避免登录后同时请求大量数据。
+原生 Android 客户端，直接使用现有 ARTEX `/api/*` 接口，服务器无需另装移动端组件。用 Jetpack Compose 构建页面，不嵌入网页。
 
-![原生 Compose 首页预览（示例数据）](preview/home.png)
+![首页预览，使用示例数据](preview/home.png)
 
-首版支持任务列表、主 Agent 会话查看与发送/停止消息、发现分页、已有独立对话、自定义相册背景和背景遮罩。首页预览使用示例数据；应用登录后显示自己服务器上的实际数据。
+## 使用
 
-用 Android Studio 打开本目录，运行 `app`。也可以在已安装 JDK 17 和 Android SDK 35 的环境运行 `./gradlew assembleDebug`，APK 位于 `app/build/outputs/apk/debug/`。
+1. 安装 Debug APK，或用 Android Studio 打开本目录运行 `app`。
+2. 输入服务器的 `IP:端口` 或完整 `https://域名:端口`，再输入 ARTEX 管理员密码。
+3. 底部保留任务、发现、对话、设置四个入口；在「设置 → 完整模式」打开其余管理页面。
 
-登录时填写 `IP:端口` 或完整 `https://域名:端口`，再填写 ARTEX 管理员密码。客户端使用 Bearer token；密码不会保存，token 由 Android Keystore 加密后存于应用私有目录。支持从系统相册选择背景图片和调节遮罩浓度。用户自行输入的 HTTP 地址可连接，但公网部署建议使用 HTTPS，以保护登录密码和 token 的传输。
+任务列表、会话、发现按页面加载；会话默认只取最近一页，避免进入任务时一次下载全部记录。会话支持发送消息、停止执行、选择文件上传附件。任务管理包括新建、暂停、继续、重命名、置顶、归档、删除及归档恢复。任务详情可查看目标、范围、发现、资产、报告、探索、覆盖和审批。完整模式包含仪表盘、流量、工具执行、LLM 记录、资产与同步、工作空间，以及 LLM、Agent、MCP、Skill、工具、通知、拦截、审批、日志和系统配置。自定义背景可从系统相册选择，并可调节遮罩。
+
+完整模式的部分复杂数据（如探索与覆盖）以原生列表呈现；日志为只读查看。桌面网页的某些高级编辑控件仍需在网页端使用。
+
+## 构建
+
+需要 JDK 17、Android SDK 35。运行 `./gradlew :app:assembleDebug :app:testDebugUnitTest`；APK 位于 `app/build/outputs/apk/debug/app-debug.apk`。`preview/` 中的图片由 Compose 预览使用示例数据生成，并非服务器截图。
+
+客户端使用 Bearer token；密码不会保存，token 由 Android Keystore 加密后存于应用私有目录。用户自行输入的 HTTP 地址可以连接；公网连接建议使用 HTTPS，以保护密码和 token 的传输。

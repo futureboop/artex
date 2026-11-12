@@ -10,6 +10,7 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import io.artex.mobile.data.Activity
 import io.artex.mobile.data.ArtexApi
+import io.artex.mobile.data.ChatAttachment
 import io.artex.mobile.data.Conversation
 import io.artex.mobile.data.Finding
 import io.artex.mobile.data.SessionStore
@@ -45,12 +46,20 @@ class ArtexViewModel(application: Application) : AndroidViewModel(application) {
     var findingSeverity by mutableStateOf("all"); private set
     var conversations by mutableStateOf<List<Conversation>>(emptyList()); private set
     var selectedTask by mutableStateOf<Task?>(null); private set
+    var taskDetailTab by mutableStateOf("chat"); private set
     var taskActivity by mutableStateOf<List<Activity>>(emptyList()); private set
     var selectedConversation by mutableStateOf<Conversation?>(null); private set
+    var selectedFinding by mutableStateOf<Finding?>(null); private set
     var conversationActivity by mutableStateOf<List<Activity>>(emptyList()); private set
     var activityDetail by mutableStateOf<String?>(null); private set
+    var creatingTask by mutableStateOf(false); private set
+    var creatingConversation by mutableStateOf(false); private set
+    var managingConversation by mutableStateOf(false); private set
+    var archivesOpen by mutableStateOf(false); private set
+    var fullModeOpen by mutableStateOf(false); private set
+    var feature by mutableStateOf<FeatureDestination?>(null); private set
     var wallpaper by mutableStateOf<Bitmap?>(null); private set
-    var wallpaperDim by mutableStateOf(store.wallpaperDim); private set
+    var wallpaperDim by mutableStateOf(store.wallpaperDim.coerceIn(0.65f, 0.95f)); private set
 
     init {
         viewModelScope.launch { wallpaper = withContext(Dispatchers.IO) { store.loadWallpaper() } }
@@ -95,9 +104,16 @@ class ArtexViewModel(application: Application) : AndroidViewModel(application) {
         conversations = emptyList()
         selectedTask = null
         selectedConversation = null
+        selectedFinding = null
         taskActivity = emptyList()
         conversationActivity = emptyList()
         activityDetail = null
+        creatingTask = false
+        creatingConversation = false
+        managingConversation = false
+        archivesOpen = false
+        fullModeOpen = false
+        feature = null
         tasksBusy = false
         findingsBusy = false
         conversationsBusy = false
@@ -109,6 +125,13 @@ class ArtexViewModel(application: Application) : AndroidViewModel(application) {
     fun selectTab(next: HomeTab) {
         selectedTask = null
         selectedConversation = null
+        selectedFinding = null
+        creatingTask = false
+        creatingConversation = false
+        managingConversation = false
+        archivesOpen = false
+        fullModeOpen = false
+        feature = null
         tab = next
         when (next) {
             HomeTab.TASKS -> if (tasks.isEmpty()) refreshTasks()
@@ -123,7 +146,15 @@ class ArtexViewModel(application: Application) : AndroidViewModel(application) {
         if (tasksBusy) return
         tasksBusy = true
         viewModelScope.launch {
-            try { val result = client.tasks(); if (api === client) tasks = result }
+            try {
+                val result = client.tasks()
+                if (api === client) {
+                    tasks = result
+                    selectedTask?.let { selected ->
+                        selectedTask = result.firstOrNull { it.id == selected.id } ?: selected
+                    }
+                }
+            }
             catch (e: Exception) { if (api === client) handleError(e) }
             finally { if (api === client) tasksBusy = false }
         }
@@ -175,7 +206,9 @@ class ArtexViewModel(application: Application) : AndroidViewModel(application) {
         detailRequestGeneration++
         activityDetailGeneration++
         selectedTask = task
+        taskDetailTab = "chat"
         selectedConversation = null
+        selectedFinding = null
         taskActivity = emptyList()
         refreshTaskActivity()
     }
@@ -185,7 +218,13 @@ class ArtexViewModel(application: Application) : AndroidViewModel(application) {
         activityDetailGeneration++
         selectedTask = null
         selectedConversation = null
+        selectedFinding = null
         activityDetail = null
+        managingConversation = false
+    }
+
+    fun selectTaskDetailTab(value: String) {
+        if (value == "chat" || value == "details") taskDetailTab = value
     }
 
     fun closeActivityDetail() { activityDetailGeneration++; activityDetail = null }
@@ -225,14 +264,14 @@ class ArtexViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    fun sendTaskMessage(message: String, onAccepted: () -> Unit) {
+    fun sendTaskMessage(message: String, attachments: List<ChatAttachment>, onAccepted: () -> Unit) {
         val client = api ?: return
         val task = selectedTask ?: return
-        if (sending || message.isBlank()) return
+        if (sending || (message.isBlank() && attachments.isEmpty())) return
         viewModelScope.launch {
             sending = true
             try {
-                client.sendTaskMessage(task.id, message.trim())
+                client.sendTaskMessage(task.id, message.trim(), attachments)
                 if (api === client && selectedTask?.id == task.id) { onAccepted(); refreshTaskActivity() }
             } catch (e: Exception) { if (api === client) handleError(e) }
             finally { if (api === client) sending = false }
@@ -253,8 +292,54 @@ class ArtexViewModel(application: Application) : AndroidViewModel(application) {
         activityDetailGeneration++
         selectedConversation = conversation
         selectedTask = null
+        selectedFinding = null
         conversationActivity = emptyList()
         refreshConversationActivity()
+    }
+
+    fun openFinding(finding: Finding) {
+        selectedFinding = finding
+        selectedTask = null
+        selectedConversation = null
+    }
+
+    fun apiClient(): ArtexApi? = api
+
+    fun openCreateTask() { creatingTask = true }
+    fun onTaskCreated(task: Task) {
+        creatingTask = false
+        refreshTasks()
+        openTask(task)
+    }
+
+    fun openCreateConversation() { creatingConversation = true }
+    fun onConversationCreated(conversation: Conversation) {
+        creatingConversation = false
+        refreshConversations()
+        openConversation(conversation)
+    }
+    fun openConversationActions() { managingConversation = true }
+    fun closeConversationActions() { managingConversation = false }
+    fun onConversationDeleted() {
+        managingConversation = false
+        selectedConversation = null
+        refreshConversations()
+    }
+
+    fun openArchives() { archivesOpen = true }
+    fun openFullMode() { fullModeOpen = true }
+    fun openFeature(destination: FeatureDestination) { feature = destination }
+    fun goBack() {
+        when {
+            creatingTask -> creatingTask = false
+            creatingConversation -> creatingConversation = false
+            managingConversation -> managingConversation = false
+            selectedTask != null || selectedConversation != null || selectedFinding != null -> closeDetail()
+            feature != null -> feature = null
+            archivesOpen -> archivesOpen = false
+            fullModeOpen -> fullModeOpen = false
+            else -> closeDetail()
+        }
     }
 
     fun refreshConversationActivity() {
@@ -271,14 +356,14 @@ class ArtexViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    fun sendConversationMessage(message: String, onAccepted: () -> Unit) {
+    fun sendConversationMessage(message: String, attachments: List<ChatAttachment>, onAccepted: () -> Unit) {
         val client = api ?: return
         val conversation = selectedConversation ?: return
-        if (sending || message.isBlank()) return
+        if (sending || (message.isBlank() && attachments.isEmpty())) return
         viewModelScope.launch {
             sending = true
             try {
-                client.sendConversationMessage(conversation.id, message.trim())
+                client.sendConversationMessage(conversation.id, message.trim(), attachments)
                 if (api === client && selectedConversation?.id == conversation.id) { onAccepted(); refreshConversationActivity() }
             } catch (e: Exception) { if (api === client) handleError(e) }
             finally { if (api === client) sending = false }
@@ -302,7 +387,10 @@ class ArtexViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun removeWallpaper() { store.clearWallpaper(); wallpaper = null }
-    fun updateWallpaperDim(value: Float) { wallpaperDim = value; store.setWallpaperDim(value) }
+    fun updateWallpaperDim(value: Float) {
+        wallpaperDim = value.coerceIn(0.65f, 0.95f)
+        store.setWallpaperDim(wallpaperDim)
+    }
 
     private fun handleError(e: Exception) {
         if (e is io.artex.mobile.data.ApiException && e.status == 401) {

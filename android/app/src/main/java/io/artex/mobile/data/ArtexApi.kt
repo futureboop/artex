@@ -2,13 +2,16 @@ package io.artex.mobile.data
 
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.OkHttpClient
+import okhttp3.Request
+import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.IOException
-import java.net.HttpURLConnection
 import java.net.URI
 import java.net.URLEncoder
-import java.net.URL
+import java.util.concurrent.TimeUnit
 
 data class Task(
     val id: String,
@@ -54,6 +57,12 @@ class ApiException(val status: Int, message: String) : IOException(message)
 /** A small native client for ARTEX's existing JSON API. No WebView or API changes. */
 class ArtexApi(baseUrl: String, @Volatile var token: String? = null) {
     val baseUrl: String = normalizeBaseUrl(baseUrl)
+    private val http = OkHttpClient.Builder()
+        .connectTimeout(8, TimeUnit.SECONDS)
+        .readTimeout(20, TimeUnit.SECONDS)
+        .followRedirects(false)
+        .followSslRedirects(false)
+        .build()
 
     suspend fun authStatus(): Boolean =
         request("GET", "/api/auth/status", authenticated = false).optBoolean("initialized")
@@ -134,17 +143,21 @@ class ArtexApi(baseUrl: String, @Volatile var token: String? = null) {
     suspend fun conversationActivityDetail(id: Long, seq: Long): String =
         request("GET", "/api/conversations/$id/messages/$seq").optString("detail")
 
-    suspend fun sendTaskMessage(taskId: String, message: String) {
+    suspend fun sendTaskMessage(taskId: String, message: String, attachments: List<ChatAttachment> = emptyList()) {
+        val body = JSONObject().put("message", message)
+        if (attachments.isNotEmpty()) body.put("attachments", JSONArray(attachments.map { it.toJson() }))
         request(
             "POST", "/api/chat?task=${encode(taskId)}",
-            JSONObject().put("message", message), readTimeoutMs = 90_000,
+            body, readTimeoutMs = 90_000,
         )
     }
 
-    suspend fun sendConversationMessage(id: Long, message: String) {
+    suspend fun sendConversationMessage(id: Long, message: String, attachments: List<ChatAttachment> = emptyList()) {
+        val body = JSONObject().put("message", message)
+        if (attachments.isNotEmpty()) body.put("attachments", JSONArray(attachments.map { it.toJson() }))
         request(
             "POST", "/api/conversations/$id/messages",
-            JSONObject().put("message", message), readTimeoutMs = 90_000,
+            body, readTimeoutMs = 90_000,
         )
     }
 
@@ -156,47 +169,52 @@ class ArtexApi(baseUrl: String, @Volatile var token: String? = null) {
         request("POST", "/api/conversations/$id/stop", JSONObject(), readTimeoutMs = 30_000)
     }
 
-    private suspend fun request(
+    internal suspend fun request(
         method: String,
         path: String,
         body: JSONObject? = null,
         authenticated: Boolean = true,
         readTimeoutMs: Int = 20_000,
     ): JSONObject = withContext(Dispatchers.IO) {
-        val connection = (URL(baseUrl + path).openConnection() as HttpURLConnection).apply {
-            requestMethod = method
-            connectTimeout = 8_000
-            readTimeout = readTimeoutMs
-            instanceFollowRedirects = false // Never forward a bearer token to another origin.
-            useCaches = false
-            setRequestProperty("Accept", "application/json")
-            setRequestProperty("Cache-Control", "no-store")
-            if (authenticated) {
-                val currentToken = token?.takeIf { it.isNotBlank() }
-                    ?: throw ApiException(401, "请先登录")
-                setRequestProperty("Authorization", "Bearer $currentToken")
-            }
-            if (body != null) {
-                doOutput = true
-                setRequestProperty("Content-Type", "application/json; charset=utf-8")
-            }
+        val payload = body?.toString()?.toRequestBody("application/json; charset=utf-8".toMediaType())
+            ?: if (method == "POST" || method == "PUT" || method == "PATCH")
+                "{}".toRequestBody("application/json; charset=utf-8".toMediaType()) else null
+        val builder = Request.Builder().url(baseUrl + path)
+            .header("Accept", "application/json")
+            .header("Cache-Control", "no-store")
+            .method(method, payload)
+        if (authenticated) {
+            val currentToken = token?.takeIf { it.isNotBlank() } ?: throw ApiException(401, "请先登录")
+            builder.header("Authorization", "Bearer $currentToken")
         }
-        try {
-            if (body != null) {
-                connection.outputStream.use { it.write(body.toString().toByteArray(Charsets.UTF_8)) }
+        http.newBuilder().readTimeout(readTimeoutMs.toLong(), TimeUnit.MILLISECONDS).build()
+            .newCall(builder.build()).execute().use { response ->
+                val text = response.body?.string().orEmpty()
+                if (!response.isSuccessful) {
+                    val error = runCatching { JSONObject(text).optString("error") }.getOrNull()
+                    throw ApiException(response.code, error?.takeIf { it.isNotBlank() } ?: "服务器返回 ${response.code}")
+                }
+                if (text.isBlank()) JSONObject() else JSONObject(text)
             }
-            val status = connection.responseCode
-            val bytes = (if (status in 200..299) connection.inputStream else connection.errorStream)
-                ?.use { it.readBytes() } ?: ByteArray(0)
-            val text = bytes.toString(Charsets.UTF_8)
-            if (status !in 200..299) {
-                val error = runCatching { JSONObject(text).optString("error") }.getOrNull()
-                throw ApiException(status, error?.takeIf { it.isNotBlank() } ?: "服务器返回 $status")
-            }
-            if (text.isBlank()) JSONObject() else JSONObject(text)
-        } finally {
-            connection.disconnect()
+    }
+
+    internal suspend fun requestText(path: String, accept: String = "text/plain, text/markdown"): String = withContext(Dispatchers.IO) {
+        val currentToken = token?.takeIf { it.isNotBlank() } ?: throw ApiException(401, "请先登录")
+        val request = Request.Builder().url(baseUrl + path)
+            .header("Authorization", "Bearer $currentToken")
+            .header("Accept", accept)
+            .header("Cache-Control", "no-store")
+            .get().build()
+        http.newCall(request).execute().use { response ->
+            val result = response.body?.string().orEmpty()
+            if (!response.isSuccessful) throw ApiException(response.code, "服务器返回 ${response.code}")
+            result
         }
+    }
+
+    internal suspend fun requestArray(path: String): JSONArray {
+        val raw = requestText(path, "application/json").trim()
+        return if (raw.isBlank() || raw == "null") JSONArray() else JSONArray(raw)
     }
 
     private fun JSONArray?.toActivities(): List<Activity> = toObjects().map { obj ->

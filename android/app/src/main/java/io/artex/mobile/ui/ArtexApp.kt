@@ -5,7 +5,6 @@ import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.BorderStroke
-import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -17,16 +16,20 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.ArrowBack
 import androidx.compose.material.icons.outlined.ArrowForward
+import androidx.compose.material.icons.outlined.Add
+import androidx.compose.material.icons.outlined.AttachFile
 import androidx.compose.material.icons.outlined.BugReport
 import androidx.compose.material.icons.outlined.Chat
 import androidx.compose.material.icons.outlined.CheckCircle
 import androidx.compose.material.icons.outlined.Delete
 import androidx.compose.material.icons.outlined.Home
 import androidx.compose.material.icons.outlined.Logout
+import androidx.compose.material.icons.outlined.MoreVert
 import androidx.compose.material.icons.outlined.Photo
 import androidx.compose.material.icons.outlined.Refresh
 import androidx.compose.material.icons.outlined.Search
@@ -40,10 +43,10 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
@@ -52,22 +55,26 @@ import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import io.artex.mobile.data.Activity
+import io.artex.mobile.data.ArtexApi
+import io.artex.mobile.data.ChatAttachment
+import io.artex.mobile.data.ChatUploadScope
 import io.artex.mobile.data.Conversation
 import io.artex.mobile.data.Finding
 import io.artex.mobile.data.Task
+import io.artex.mobile.data.uploadChatAttachments
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 
-private val Ink = Color(0xFF172B29)
+private val Ink = Color(0xFF1C2E2A)
 private val Moss = Color(0xFF3F6658)
 private val Olive = Color(0xFF879B80)
 private val Cream = Color(0xFFF6F4EF)
-private val Sand = Color(0xFFE8E0D0)
-private val Muted = Color(0xFF74827B)
-private val Line = Color(0xFFE0E6DE)
-private val Clay = Color(0xFFBB765F)
+private val Muted = Color(0xFF73807A)
+private val Line = Color(0xFFE3E6DE)
+private val Clay = Color(0xFFB56D55)
 
 private val ArtexColors = lightColorScheme(
     primary = Moss, onPrimary = Color.White,
@@ -83,14 +90,16 @@ fun ArtexApp(model: ArtexViewModel) {
         LaunchedEffect(model.error) {
             model.error?.let { snackbar.showSnackbar(it); model.clearError() }
         }
-        BackHandler(enabled = model.selectedTask != null || model.selectedConversation != null) {
-            model.closeDetail()
+        BackHandler(enabled = model.selectedTask != null || model.selectedConversation != null || model.selectedFinding != null ||
+            model.creatingTask || model.creatingConversation || model.managingConversation || model.archivesOpen ||
+            model.fullModeOpen || model.feature != null) {
+            model.goBack()
         }
-        LaunchedEffect(model.signedIn, model.tab, model.selectedTask?.id, model.selectedConversation?.id) {
+        LaunchedEffect(model.signedIn, model.tab, model.selectedTask?.id, model.selectedConversation?.id, model.taskDetailTab) {
             while (model.signedIn) {
                 delay(if (model.selectedTask != null || model.selectedConversation != null) 6_000 else 20_000)
                 when {
-                    model.selectedTask != null -> model.refreshTaskActivity()
+                    model.selectedTask != null && model.taskDetailTab == "chat" -> model.refreshTaskActivity()
                     model.selectedConversation != null -> model.refreshConversationActivity()
                     model.tab == HomeTab.TASKS -> model.refreshTasks()
                     model.tab == HomeTab.CONVERSATIONS -> model.refreshConversations()
@@ -106,43 +115,83 @@ fun ArtexApp(model: ArtexViewModel) {
                 Scaffold(
                     containerColor = Color.Transparent,
                     contentWindowInsets = WindowInsets(0, 0, 0, 0),
-                    snackbarHost = { SnackbarHost(snackbar) },
                     bottomBar = {
-                        if (model.selectedTask == null && model.selectedConversation == null) {
+                        if (model.selectedTask == null && model.selectedConversation == null && model.selectedFinding == null &&
+                            !model.creatingTask && !model.creatingConversation && !model.archivesOpen && !model.fullModeOpen) {
                             BottomBar(model.tab, model::selectTab)
                         }
                     },
                 ) { padding ->
                     Box(Modifier.fillMaxSize().padding(padding).statusBarsPadding()) {
                         when {
+                            model.creatingTask -> CreateTaskScreen(model.apiClient()!!, model::goBack, model::onTaskCreated)
+                            model.creatingConversation -> CreateConversationScreen(model.apiClient()!!, model::goBack, model::onConversationCreated)
+                            model.managingConversation && model.selectedConversation != null -> ConversationActionsScreen(
+                                model.selectedConversation!!, model.apiClient()!!, model::closeConversationActions,
+                                model::refreshConversations, model::onConversationDeleted,
+                            )
+                            model.archivesOpen -> TaskArchivesScreen(model.apiClient()!!, model::goBack, model::refreshTasks)
                             model.selectedTask != null -> TaskDetail(
                                 model.selectedTask!!, model.taskActivity, model.detailBusy, model.sending,
                                 model::closeDetail, model::refreshTaskActivity,
                                 model::sendTaskMessage, model::stopTaskChat, model::openActivityDetail,
+                                model.apiClient()!!, { model.refreshTasks() }, { model.closeDetail(); model.refreshTasks() },
+                                model.taskDetailTab, model::selectTaskDetailTab,
                             )
                             model.selectedConversation != null -> ConversationDetail(
                                 model.selectedConversation!!, model.conversationActivity, model.detailBusy, model.sending,
                                 model::closeDetail, model::refreshConversationActivity,
                                 model::sendConversationMessage, model::stopConversation, model::openActivityDetail,
+                                model::openConversationActions, model.apiClient()!!,
                             )
+                            model.selectedFinding != null -> FindingDetailScreen(
+                                model.selectedFinding!!, model.apiClient()!!, model::closeDetail, { model.refreshFindings() },
+                            )
+                            model.feature != null -> when (model.feature!!) {
+                                FeatureDestination.DASHBOARD -> DashboardScreen(
+                                    model.apiClient()!!, model::goBack, model::openTask, model::openFinding,
+                                )
+                                FeatureDestination.LLM -> LlmProfilesScreen(model.apiClient()!!, model::goBack)
+                                FeatureDestination.SYSTEM_SETTINGS -> SystemSettingsScreen(model.apiClient()!!, model::goBack)
+                                FeatureDestination.TRAFFIC, FeatureDestination.COMMANDS,
+                                FeatureDestination.LLM_RECORDS, FeatureDestination.ASSETS,
+                                FeatureDestination.SYNC, FeatureDestination.WORKSPACE ->
+                                    OperationsScreen(model.feature!!, model.apiClient()!!, model::goBack)
+                                FeatureDestination.AGENTS, FeatureDestination.MCP,
+                                FeatureDestination.SKILLS, FeatureDestination.TOOLS,
+                                FeatureDestination.NOTIFY, FeatureDestination.INTERCEPT,
+                                FeatureDestination.ASSET_INTERCEPT, FeatureDestination.APPROVALS ->
+                                    AdminResourceScreen(model.feature!!, model.apiClient()!!, model::goBack)
+                                else -> FeatureExplorer(model.feature!!, model.apiClient()!!, model::goBack)
+                            }
+                            model.fullModeOpen -> Column {
+                                Row(Modifier.fillMaxWidth().padding(start = 12.dp, top = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+                                    IconButton(onClick = model::goBack) { Icon(Icons.Outlined.ArrowBack, "返回设置") }
+                                }
+                                Box(Modifier.weight(1f)) { FullModeMenu(model::openFeature) }
+                            }
                             model.tab == HomeTab.TASKS -> HomeContent(
                                 model.tasks, model.serverAddress, model.tasksBusy,
-                                model::refreshTasks, model::openTask,
+                                model::refreshTasks, model::openTask, model::openCreateTask,
                             )
                             model.tab == HomeTab.FINDINGS -> FindingsContent(
                                 model.findings, model.findingsTotal, model.findingsBusy,
                                 model.findingSeverity, model::selectFindingSeverity,
-                                { model.refreshFindings() }, { model.refreshFindings(true) },
+                                { model.refreshFindings() }, { model.refreshFindings(true) }, model::openFinding,
                             )
                             model.tab == HomeTab.CONVERSATIONS -> ConversationsContent(
                                 model.conversations, model.conversationsBusy,
-                                model::refreshConversations, model::openConversation,
+                                model::refreshConversations, model::openConversation, model::openCreateConversation,
                             )
-                            else -> SettingsContent(model)
+                            else -> SettingsContent(model, model::openFullMode, model::openArchives)
                         }
                     }
                 }
             }
+            SnackbarHost(snackbar, Modifier.align(Alignment.BottomCenter).navigationBarsPadding()
+                .padding(horizontal = 16.dp).padding(bottom = if (model.signedIn &&
+                    model.selectedTask == null && model.selectedConversation == null && model.selectedFinding == null &&
+                    !model.creatingTask && !model.creatingConversation && !model.fullModeOpen && !model.archivesOpen) 92.dp else 18.dp))
             model.activityDetail?.let { detail ->
                 AlertDialog(
                     onDismissRequest = model::closeActivityDetail,
@@ -161,17 +210,10 @@ fun ArtexApp(model: ArtexViewModel) {
 
 @Composable
 private fun AppBackdrop(wallpaper: Bitmap?, dim: Float) {
-    Box(Modifier.fillMaxSize().background(Brush.linearGradient(listOf(Cream, Color(0xFFE7EEE8), Color(0xFFF7F1E8))))) {
+    Box(Modifier.fillMaxSize().background(Cream)) {
         if (wallpaper != null) {
             Image(wallpaper.asImageBitmap(), null, Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
-            Box(Modifier.fillMaxSize().background(Color(0xFFF8F7F2).copy(alpha = dim)))
-        } else {
-            Canvas(Modifier.fillMaxSize()) {
-                drawCircle(Color(0xFFDDE8DC).copy(alpha = 0.48f), radius = size.width * 0.53f,
-                    center = androidx.compose.ui.geometry.Offset(size.width * 1.02f, size.height * 0.08f))
-                drawCircle(Color(0xFFF1E4D2).copy(alpha = 0.55f), radius = size.width * 0.44f,
-                    center = androidx.compose.ui.geometry.Offset(-size.width * 0.10f, size.height * 0.79f))
-            }
+            Box(Modifier.fillMaxSize().background(Cream.copy(alpha = dim.coerceAtLeast(0.65f))))
         }
     }
 }
@@ -179,10 +221,10 @@ private fun AppBackdrop(wallpaper: Bitmap?, dim: Float) {
 @Composable
 private fun BrandMark(size: Int = 42) {
     Box(
-        Modifier.size(size.dp).clip(RoundedCornerShape((size * 0.31f).dp)).background(Ink),
+        Modifier.size(size.dp).clip(RoundedCornerShape((size * 0.16f).dp)).background(Ink),
         contentAlignment = Alignment.Center,
     ) {
-        Text("A", color = Color(0xFFE9DCC4), fontSize = (size * 0.58f).sp, fontWeight = FontWeight.SemiBold)
+        Text("A", color = Color.White, fontSize = (size * 0.55f).sp, fontWeight = FontWeight.SemiBold)
     }
 }
 
@@ -194,55 +236,53 @@ private fun LoginScreen(savedAddress: String, busy: Boolean, onLogin: (String, S
         Modifier.fillMaxSize().statusBarsPadding().navigationBarsPadding().verticalScroll(rememberScrollState()).padding(horizontal = 28.dp),
         verticalArrangement = Arrangement.Center,
     ) {
-        BrandMark(58)
-        Spacer(Modifier.height(28.dp))
-        Text("ARTEX  /  MOBILE", color = Moss, fontSize = 12.sp, fontWeight = FontWeight.Bold, letterSpacing = 2.sp)
-        Spacer(Modifier.height(12.dp))
-        Text("你的工作台，\n随时在手边。", color = Ink, fontSize = 35.sp, lineHeight = 44.sp, fontWeight = FontWeight.SemiBold)
-        Spacer(Modifier.height(12.dp))
-        Text("连接自己的服务器，查看任务、发现与对话。", color = Muted, fontSize = 14.sp)
-        Spacer(Modifier.height(42.dp))
-        GlassCard {
-            Column(Modifier.padding(22.dp)) {
-                Text("连接服务器", color = Ink, fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
-                Spacer(Modifier.height(20.dp))
-                Text("服务器地址", color = Muted, fontSize = 12.sp)
-                Spacer(Modifier.height(7.dp))
-                OutlinedTextField(
-                    value = address, onValueChange = { address = it }, singleLine = true,
-                    placeholder = { Text("例如 192.0.2.10:32451") },
-                    modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(16.dp),
-                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri),
-                )
-                Spacer(Modifier.height(17.dp))
-                Text("管理员密码", color = Muted, fontSize = 12.sp)
-                Spacer(Modifier.height(7.dp))
-                OutlinedTextField(
-                    value = password, onValueChange = { password = it }, singleLine = true,
-                    placeholder = { Text("输入密码") }, visualTransformation = PasswordVisualTransformation(),
-                    modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(16.dp),
-                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
-                )
-                Spacer(Modifier.height(23.dp))
-                Button(
-                    onClick = { onLogin(address, password) }, enabled = !busy,
-                    modifier = Modifier.fillMaxWidth().height(54.dp), shape = RoundedCornerShape(16.dp),
-                    colors = ButtonDefaults.buttonColors(containerColor = Ink),
-                ) {
-                    if (busy) CircularProgressIndicator(Modifier.size(20.dp), color = Color.White, strokeWidth = 2.dp)
-                    else { Text("进入工作台", fontWeight = FontWeight.SemiBold); Spacer(Modifier.width(8.dp)); Icon(Icons.Outlined.ArrowForward, null, Modifier.size(18.dp)) }
-                }
-            }
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            BrandMark(34)
+            Spacer(Modifier.width(11.dp))
+            Text("ARTEX", color = Ink, fontSize = 17.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.2.sp)
         }
-        Spacer(Modifier.height(18.dp))
+        Spacer(Modifier.height(38.dp))
+        Text("连接工作台", color = Ink, fontSize = 31.sp, fontWeight = FontWeight.SemiBold)
+        Spacer(Modifier.height(8.dp))
+        Text("输入服务器地址和管理员密码。", color = Muted, fontSize = 14.sp)
+        Spacer(Modifier.height(36.dp))
+        Text("服务器地址", color = Ink, fontSize = 13.sp, fontWeight = FontWeight.Medium)
+        Spacer(Modifier.height(8.dp))
+        OutlinedTextField(
+            value = address, onValueChange = { address = it }, singleLine = true,
+            placeholder = { Text("例如 192.0.2.10:32451") },
+            modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(10.dp),
+            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri),
+            colors = OutlinedTextFieldDefaults.colors(unfocusedContainerColor = Color.White, focusedContainerColor = Color.White),
+        )
+        Spacer(Modifier.height(19.dp))
+        Text("管理员密码", color = Ink, fontSize = 13.sp, fontWeight = FontWeight.Medium)
+        Spacer(Modifier.height(8.dp))
+        OutlinedTextField(
+            value = password, onValueChange = { password = it }, singleLine = true,
+            placeholder = { Text("输入密码") }, visualTransformation = PasswordVisualTransformation(),
+            modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(10.dp),
+            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+            colors = OutlinedTextFieldDefaults.colors(unfocusedContainerColor = Color.White, focusedContainerColor = Color.White),
+        )
+        Spacer(Modifier.height(26.dp))
+        Button(
+            onClick = { onLogin(address, password) }, enabled = !busy,
+            modifier = Modifier.fillMaxWidth().height(52.dp), shape = RoundedCornerShape(10.dp),
+            colors = ButtonDefaults.buttonColors(containerColor = Ink),
+        ) {
+            if (busy) CircularProgressIndicator(Modifier.size(20.dp), color = Color.White, strokeWidth = 2.dp)
+            else Text("连接", fontWeight = FontWeight.SemiBold)
+        }
+        Spacer(Modifier.height(20.dp))
         Text("支持 IP:端口 或 HTTPS 地址。公网连接建议使用 HTTPS。", color = Muted, fontSize = 11.sp, lineHeight = 17.sp)
     }
 }
 
 @Composable
-private fun GlassCard(modifier: Modifier = Modifier, content: @Composable () -> Unit) {
-    Surface(modifier, shape = RoundedCornerShape(24.dp), color = Color.White.copy(alpha = 0.82f),
-        border = BorderStroke(1.dp, Color.White.copy(alpha = 0.85f)), shadowElevation = 2.dp) { content() }
+private fun ContentPanel(modifier: Modifier = Modifier, content: @Composable () -> Unit) {
+    Surface(modifier, shape = RoundedCornerShape(12.dp), color = Color.White.copy(alpha = 0.93f),
+        border = BorderStroke(1.dp, Line)) { content() }
 }
 
 @Composable
@@ -279,58 +319,54 @@ private fun BottomBar(current: HomeTab, onSelect: (HomeTab) -> Unit) {
 @Composable
 private fun HomeContent(
     tasks: List<Task>, server: String, busy: Boolean,
-    onRefresh: () -> Unit, onOpenTask: (Task) -> Unit,
+    onRefresh: () -> Unit, onOpenTask: (Task) -> Unit, onCreate: () -> Unit,
 ) {
     var query by rememberSaveable { mutableStateOf("") }
-    val shown = remember(tasks, query) {
-        tasks.filter { query.isBlank() || it.title.contains(query, true) || it.id.contains(query, true) }
+    var filter by rememberSaveable { mutableStateOf("all") }
+    val shown = remember(tasks, query, filter) {
+        tasks.filter { task ->
+            (filter == "all" || task.status == filter) &&
+                (query.isBlank() || task.title.contains(query, true) || task.id.contains(query, true))
+        }
             .sortedWith(compareByDescending<Task> { it.pinned }.thenByDescending { it.lastActivityUnix })
     }
     val running = tasks.count { it.status == "running" }
     val finished = tasks.count { it.status == "done" }
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
-        contentPadding = PaddingValues(start = 20.dp, end = 20.dp, top = 24.dp, bottom = 24.dp),
-        verticalArrangement = Arrangement.spacedBy(14.dp),
+        contentPadding = PaddingValues(start = 20.dp, end = 20.dp, top = 14.dp, bottom = 20.dp),
     ) {
         item {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                BrandMark()
-                Spacer(Modifier.width(11.dp))
-                Column {
-                    Text("ARTEX", color = Ink, fontSize = 17.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.5.sp)
-                    Text("FIELD CONSOLE", color = Muted, fontSize = 9.sp, letterSpacing = 1.8.sp)
-                }
+                BrandMark(29)
+                Spacer(Modifier.width(9.dp))
+                Text("ARTEX", color = Ink, fontSize = 15.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.sp)
                 Spacer(Modifier.weight(1f))
-                Surface(shape = CircleShape, color = Color.White.copy(alpha = 0.8f), border = BorderStroke(1.dp, Line)) {
-                    Box(Modifier.size(42.dp).clickable { onRefresh() }, contentAlignment = Alignment.Center) {
-                        Icon(Icons.Outlined.Refresh, "刷新", tint = Moss, modifier = Modifier.size(19.dp))
+                Surface(shape = CircleShape, color = Ink) {
+                    IconButton(onClick = onCreate, modifier = Modifier.size(40.dp)) {
+                        Icon(Icons.Outlined.Add, "新建任务", tint = Color.White, modifier = Modifier.size(21.dp))
                     }
                 }
-            }
-        }
-        item { Spacer(Modifier.height(13.dp)) }
-        item {
-            Column {
-                Text(today(), color = Muted, fontSize = 12.sp, letterSpacing = 0.6.sp)
-                Spacer(Modifier.height(7.dp))
-                Text("掌握每一步进展。", color = Ink, fontSize = 29.sp, lineHeight = 36.sp, fontWeight = FontWeight.SemiBold)
-                Spacer(Modifier.height(8.dp))
-                Text("${server.removePrefix("https://").removePrefix("http://")}  ·  已连接", color = Moss, fontSize = 12.sp,
-                    maxLines = 1, overflow = TextOverflow.Ellipsis)
-            }
-        }
-        item { Spacer(Modifier.height(4.dp)) }
-        item { OverviewHero(running, tasks.size, finished) }
-        item { Spacer(Modifier.height(9.dp)) }
-        item {
-            Row(verticalAlignment = Alignment.Bottom) {
-                Column {
-                    Text("进行中的工作", color = Ink, fontSize = 21.sp, fontWeight = FontWeight.SemiBold)
-                    Text("最近更新的任务", color = Muted, fontSize = 12.sp)
+                Spacer(Modifier.width(7.dp))
+                IconButton(onClick = onRefresh, modifier = Modifier.size(48.dp)) {
+                    Icon(Icons.Outlined.Refresh, "刷新", tint = Muted, modifier = Modifier.size(19.dp))
                 }
-                Spacer(Modifier.weight(1f))
-                Text("${tasks.size} 项", color = Moss, fontSize = 12.sp, fontWeight = FontWeight.Medium)
+            }
+        }
+        item {
+            Column(Modifier.padding(top = 21.dp, bottom = 18.dp)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text("任务", color = Ink, fontSize = 30.sp, fontWeight = FontWeight.SemiBold)
+                    Spacer(Modifier.weight(1f))
+                    Text(tasks.size.toString().padStart(2, '0'), color = Moss, fontSize = 29.sp, fontWeight = FontWeight.Light)
+                }
+                Spacer(Modifier.height(5.dp))
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Box(Modifier.size(6.dp).background(Moss, CircleShape))
+                    Spacer(Modifier.width(6.dp))
+                    Text(server.removePrefix("https://").removePrefix("http://"), color = Muted, fontSize = 12.sp,
+                        maxLines = 1, overflow = TextOverflow.Ellipsis)
+                }
             }
         }
         item {
@@ -338,98 +374,89 @@ private fun HomeContent(
                 value = query, onValueChange = { query = it }, singleLine = true,
                 placeholder = { Text("搜索任务编号或名称", fontSize = 13.sp) },
                 leadingIcon = { Icon(Icons.Outlined.Search, null, Modifier.size(19.dp)) },
-                modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(18.dp),
+                modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(10.dp),
                 colors = OutlinedTextFieldDefaults.colors(
-                    unfocusedContainerColor = Color.White.copy(alpha = 0.66f),
-                    focusedContainerColor = Color.White.copy(alpha = 0.86f),
-                    unfocusedBorderColor = Color.White, focusedBorderColor = Olive,
+                    unfocusedContainerColor = Color.White.copy(alpha = 0.92f),
+                    focusedContainerColor = Color.White,
+                    unfocusedBorderColor = Line, focusedBorderColor = Moss,
                 ),
             )
         }
+        item {
+            Row(Modifier.fillMaxWidth().padding(top = 15.dp), verticalAlignment = Alignment.CenterVertically) {
+                listOf(Triple("all", "全部", tasks.size), Triple("running", "运行中", running),
+                    Triple("done", "已完成", finished)).forEach { (value, label, count) ->
+                    val selected = filter == value
+                    Column(Modifier.weight(1f).clickable { filter = value }, horizontalAlignment = Alignment.CenterHorizontally) {
+                        Text("$label  $count", Modifier.padding(vertical = 10.dp),
+                            color = if (selected) Ink else Muted, fontSize = 13.sp,
+                            fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal)
+                        Box(Modifier.fillMaxWidth().height(2.dp).background(if (selected) Moss else Color.Transparent))
+                    }
+                }
+            }
+            HorizontalDivider(color = Line)
+        }
         if (busy && tasks.isEmpty()) item { LoadingRow() }
-        if (!busy && shown.isEmpty()) item { EmptyMessage(if (query.isBlank()) "还没有任务" else "没有匹配的任务") }
+        if (!busy && shown.isEmpty()) item {
+            EmptyMessage(when {
+                query.isNotBlank() -> "没有匹配的任务"
+                filter == "running" -> "没有运行中的任务"
+                filter == "done" -> "没有已完成的任务"
+                else -> "还没有任务"
+            })
+        }
         items(shown, key = { it.id }) { task -> TaskCard(task) { onOpenTask(task) } }
     }
 }
 
 @Composable
-private fun OverviewHero(running: Int, total: Int, finished: Int) {
-    Box(Modifier.fillMaxWidth().height(180.dp).clip(RoundedCornerShape(28.dp))
-        .background(Brush.linearGradient(listOf(Ink, Color(0xFF35584B))))) {
-        Canvas(Modifier.fillMaxSize()) {
-            drawCircle(Color.White.copy(alpha = 0.055f), size.width * 0.45f,
-                androidx.compose.ui.geometry.Offset(size.width * 0.98f, size.height * 0.02f))
-            drawCircle(Color.White.copy(alpha = 0.055f), size.width * 0.32f,
-                androidx.compose.ui.geometry.Offset(size.width * 0.99f, size.height * 0.02f))
-        }
-        Column(Modifier.fillMaxSize().padding(22.dp)) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Box(Modifier.size(7.dp).background(Color(0xFFB5D6AA), CircleShape))
-                Spacer(Modifier.width(8.dp))
-                Text("LIVE OVERVIEW", color = Color(0xFFDDEBE1), fontSize = 10.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.6.sp)
-            }
-            Spacer(Modifier.weight(1f))
-            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.Bottom) {
-                HeroNumber("$running", "正在运行", Modifier.weight(1f))
-                Box(Modifier.width(1.dp).height(43.dp).background(Color.White.copy(alpha = 0.17f)))
-                HeroNumber("$total", "全部任务", Modifier.weight(1f))
-                Box(Modifier.width(1.dp).height(43.dp).background(Color.White.copy(alpha = 0.17f)))
-                HeroNumber("$finished", "已完成", Modifier.weight(1f))
-            }
-        }
-    }
-}
-
-@Composable private fun HeroNumber(value: String, label: String, modifier: Modifier) {
-    Column(modifier.padding(start = 11.dp)) {
-        Text(value, color = Color.White, fontSize = 29.sp, fontWeight = FontWeight.SemiBold, lineHeight = 31.sp)
-        Spacer(Modifier.height(6.dp))
-        Text(label, color = Color(0xFFC8D7CD), fontSize = 11.sp)
-    }
-}
-
-@Composable
 private fun TaskCard(task: Task, onClick: () -> Unit) {
-    GlassCard(Modifier.fillMaxWidth().clickable(onClick = onClick)) {
-        Column(Modifier.padding(18.dp)) {
+    val (statusLabel, statusColor) = statusInfo(task.status)
+    Surface(Modifier.fillMaxWidth().padding(top = 8.dp).clickable(onClick = onClick),
+        shape = RoundedCornerShape(14.dp), color = Color.White.copy(alpha = 0.93f),
+        border = BorderStroke(1.dp, Line)) {
+        Column(Modifier.padding(horizontal = 15.dp, vertical = 14.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                StatusPill(task.status)
+                Box(Modifier.size(7.dp).background(statusColor, CircleShape))
+                Spacer(Modifier.width(7.dp))
+                Text(statusLabel, color = statusColor, fontSize = 11.sp, fontWeight = FontWeight.Medium)
+                Spacer(Modifier.width(11.dp))
+                Text("#${task.id}", color = Muted, fontSize = 11.sp)
                 Spacer(Modifier.weight(1f))
-                Text("#${task.id}", color = Muted, fontSize = 12.sp)
+                if (task.pinned) Text("置顶", color = Muted, fontSize = 11.sp)
             }
-            Spacer(Modifier.height(12.dp))
-            Text(task.title, color = Ink, fontSize = 16.sp, fontWeight = FontWeight.SemiBold,
+            Spacer(Modifier.height(7.dp))
+            Text(task.title, color = Ink, fontSize = 16.sp, fontWeight = FontWeight.Medium,
                 maxLines = 2, overflow = TextOverflow.Ellipsis, lineHeight = 22.sp)
             if (task.description.isNotBlank() && task.description != task.title) {
-                Spacer(Modifier.height(5.dp))
+                Spacer(Modifier.height(4.dp))
                 Text(task.description, color = Muted, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
             }
-            Spacer(Modifier.height(16.dp))
-            HorizontalDivider(color = Line.copy(alpha = 0.7f))
-            Spacer(Modifier.height(12.dp))
+            Spacer(Modifier.height(8.dp))
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Icon(Icons.Outlined.BugReport, null, Modifier.size(15.dp), tint = Clay)
-                Spacer(Modifier.width(5.dp))
-                Text("${task.findings} 个发现", color = Muted, fontSize = 11.sp)
+                Text("${task.findings} 个发现", color = if (task.findings > 0) Clay else Muted, fontSize = 11.sp)
                 Spacer(Modifier.weight(1f))
                 Text(formatUnix(task.lastActivityUnix), color = Muted, fontSize = 11.sp)
-                Spacer(Modifier.width(6.dp))
-                Icon(Icons.Outlined.ArrowForward, null, Modifier.size(15.dp), tint = Moss)
+                Spacer(Modifier.width(5.dp))
+                Icon(Icons.Outlined.ArrowForward, null, Modifier.size(15.dp), tint = Muted)
             }
         }
     }
+}
+
+private fun statusInfo(status: String): Pair<String, Color> = when (status) {
+    "running" -> "运行中" to Moss
+    "done" -> "已完成" to Color(0xFF557D6C)
+    "paused" -> "已暂停" to Color(0xFFA27948)
+    "failed", "timeout" -> "需关注" to Clay
+    "queued" -> "排队中" to Color(0xFF7C7FA0)
+    else -> "待开始" to Muted
 }
 
 @Composable
 private fun StatusPill(status: String) {
-    val (label, tint) = when (status) {
-        "running" -> "运行中" to Moss
-        "done" -> "已完成" to Color(0xFF557D6C)
-        "paused" -> "已暂停" to Color(0xFFA27948)
-        "failed", "timeout" -> "需关注" to Clay
-        "queued" -> "排队中" to Color(0xFF7C7FA0)
-        else -> "待开始" to Muted
-    }
+    val (label, tint) = statusInfo(status)
     Row(Modifier.clip(CircleShape).background(tint.copy(alpha = 0.11f)).padding(horizontal = 10.dp, vertical = 5.dp),
         verticalAlignment = Alignment.CenterVertically) {
         Box(Modifier.size(6.dp).background(tint, CircleShape))
@@ -445,14 +472,13 @@ private fun StatusPill(status: String) {
 }
 
 @Composable private fun EmptyMessage(message: String) {
-    GlassCard(Modifier.fillMaxWidth()) {
+    ContentPanel(Modifier.fillMaxWidth().padding(top = 16.dp)) {
         Box(Modifier.fillMaxWidth().padding(30.dp), contentAlignment = Alignment.Center) {
             Text(message, color = Muted, fontSize = 14.sp)
         }
     }
 }
 
-private fun today(): String = SimpleDateFormat("yyyy年M月d日 · EEEE", Locale.CHINA).format(Date())
 private fun formatUnix(seconds: Long): String = if (seconds <= 0) "暂无动态" else
     SimpleDateFormat("MM/dd HH:mm", Locale.CHINA).format(Date(seconds * 1000))
 
@@ -470,7 +496,7 @@ fun HomePreview() {
                             Task("61", "Web 应用漏洞验证", "验证资产中发现的风险", "running", 8, 1794547200),
                             Task("58", "API 接口审计", "检查接口授权与敏感数据暴露", "done", 5, 1794490000),
                         ),
-                        server = "192.0.2.10:32451", busy = false, onRefresh = {}, onOpenTask = {},
+                        server = "192.0.2.10:32451", busy = false, onRefresh = {}, onOpenTask = {}, onCreate = {},
                     )
                 }
                 BottomBar(HomeTab.TASKS, {})
@@ -479,21 +505,44 @@ fun HomePreview() {
     }
 }
 
+@Preview(showBackground = true, widthDp = 393, heightDp = 852, name = "ARTEX Login")
 @Composable
-private fun SectionHeader(eyebrow: String, title: String, subtitle: String, onRefresh: (() -> Unit)?) {
-    Row(verticalAlignment = Alignment.Top) {
+fun LoginPreview() {
+    MaterialTheme(colorScheme = ArtexColors) {
+        Box(Modifier.fillMaxSize()) {
+            AppBackdrop(null, 0.68f)
+            LoginScreen("", false) { _, _ -> }
+        }
+    }
+}
+
+@Preview(showBackground = true, widthDp = 393, heightDp = 852, name = "ARTEX Full Mode")
+@Composable
+fun FullModePreview() {
+    MaterialTheme(colorScheme = ArtexColors) {
+        Box(Modifier.fillMaxSize()) {
+            AppBackdrop(null, 0.68f)
+            FullModeMenu {}
+        }
+    }
+}
+
+@Composable
+private fun SectionHeader(title: String, subtitle: String, onRefresh: (() -> Unit)?, onAdd: (() -> Unit)? = null) {
+    Row(Modifier.fillMaxWidth().padding(bottom = 20.dp), verticalAlignment = Alignment.CenterVertically) {
         Column(Modifier.weight(1f)) {
-            Text(eyebrow, color = Moss, fontSize = 10.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.5.sp)
-            Spacer(Modifier.height(7.dp))
-            Text(title, color = Ink, fontSize = 29.sp, fontWeight = FontWeight.SemiBold)
+            Text(title, color = Ink, fontSize = 30.sp, fontWeight = FontWeight.SemiBold)
             Spacer(Modifier.height(5.dp))
             Text(subtitle, color = Muted, fontSize = 12.sp)
         }
         if (onRefresh != null) {
-            Surface(shape = CircleShape, color = Color.White.copy(alpha = 0.86f), border = BorderStroke(1.dp, Line)) {
-                Box(Modifier.size(42.dp).clickable { onRefresh() }, contentAlignment = Alignment.Center) {
-                    Icon(Icons.Outlined.Refresh, "刷新", Modifier.size(18.dp), tint = Moss)
-                }
+            IconButton(onClick = onRefresh, modifier = Modifier.size(48.dp)) {
+                Icon(Icons.Outlined.Refresh, "刷新", Modifier.size(19.dp), tint = Muted)
+            }
+        }
+        if (onAdd != null) {
+            IconButton(onClick = onAdd, modifier = Modifier.size(48.dp)) {
+                Icon(Icons.Outlined.Add, "新建", Modifier.size(22.dp), tint = Moss)
             }
         }
     }
@@ -503,20 +552,21 @@ private fun SectionHeader(eyebrow: String, title: String, subtitle: String, onRe
 private fun FindingsContent(
     findings: List<Finding>, total: Int, busy: Boolean,
     selectedSeverity: String, onSeverityChange: (String) -> Unit,
-    onRefresh: () -> Unit, onMore: () -> Unit,
+    onRefresh: () -> Unit, onMore: () -> Unit, onOpen: (Finding) -> Unit,
 ) {
     val severities = listOf("全部" to "all", "严重" to "critical", "高危" to "high", "中危" to "medium", "低危" to "low")
     LazyColumn(
-        Modifier.fillMaxSize(), contentPadding = PaddingValues(20.dp),
-        verticalArrangement = Arrangement.spacedBy(12.dp),
+        Modifier.fillMaxSize(), contentPadding = PaddingValues(start = 20.dp, end = 20.dp, top = 21.dp, bottom = 20.dp),
+        verticalArrangement = Arrangement.spacedBy(9.dp),
     ) {
-        item { SectionHeader("SECURITY FINDINGS", "发现", "已登记 $total 项发现", onRefresh) }
+        item { SectionHeader("发现", "已登记 $total 项发现", onRefresh) }
         item {
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 severities.forEach { (label, value) ->
                     val selected = value == selectedSeverity
                     Surface(
-                        shape = CircleShape, color = if (selected) Ink else Color.White.copy(alpha = 0.82f),
+                        shape = RoundedCornerShape(8.dp), color = if (selected) Ink else Color.White.copy(alpha = 0.92f),
                         border = BorderStroke(1.dp, if (selected) Ink else Line),
                         modifier = Modifier.clickable { onSeverityChange(value) },
                     ) {
@@ -526,9 +576,10 @@ private fun FindingsContent(
                 }
             }
         }
+        item { Spacer(Modifier.height(3.dp)) }
         if (busy && findings.isEmpty()) item { LoadingRow() }
         if (!busy && findings.isEmpty()) item { EmptyMessage("暂无对应的发现") }
-        items(findings, key = { it.id }) { finding -> FindingCard(finding) }
+        items(findings, key = { it.id }) { finding -> FindingCard(finding) { onOpen(finding) } }
         if (findings.size < total) item {
             OutlinedButton(onClick = onMore, enabled = !busy, modifier = Modifier.fillMaxWidth(),
                 shape = RoundedCornerShape(16.dp)) { Text(if (busy) "加载中…" else "加载更多") }
@@ -537,7 +588,7 @@ private fun FindingsContent(
 }
 
 @Composable
-private fun FindingCard(finding: Finding) {
+private fun FindingCard(finding: Finding, onClick: () -> Unit) {
     val tint = when (finding.severity) {
         "critical" -> Color(0xFFB54F4C)
         "high" -> Clay
@@ -550,8 +601,8 @@ private fun FindingCard(finding: Finding) {
         "medium" -> "中危"
         else -> "低危"
     }
-    GlassCard(Modifier.fillMaxWidth()) {
-        Column(Modifier.padding(18.dp)) {
+    ContentPanel(Modifier.fillMaxWidth().clickable(onClick = onClick)) {
+        Column(Modifier.padding(16.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Box(Modifier.size(8.dp).background(tint, CircleShape))
                 Spacer(Modifier.width(7.dp))
@@ -574,46 +625,63 @@ private fun FindingCard(finding: Finding) {
 @Composable
 private fun ConversationsContent(
     conversations: List<Conversation>, busy: Boolean,
-    onRefresh: () -> Unit, onOpen: (Conversation) -> Unit,
+    onRefresh: () -> Unit, onOpen: (Conversation) -> Unit, onCreate: () -> Unit,
 ) {
-    LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(20.dp),
-        verticalArrangement = Arrangement.spacedBy(12.dp)) {
-        item { SectionHeader("AGENT CONVERSATIONS", "对话", "与 Agent 保持联系", onRefresh) }
+    LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(start = 20.dp, end = 20.dp, top = 21.dp, bottom = 20.dp)) {
+        item { SectionHeader("对话", "独立 Agent 会话", onRefresh, onCreate) }
         if (busy && conversations.isEmpty()) item { LoadingRow() }
         if (!busy && conversations.isEmpty()) item { EmptyMessage("还没有独立对话") }
         items(conversations, key = { it.id }) { conversation ->
-            GlassCard(Modifier.fillMaxWidth().clickable { onOpen(conversation) }) {
-                Row(Modifier.padding(18.dp), verticalAlignment = Alignment.CenterVertically) {
-                    Box(Modifier.size(43.dp).background(Color(0xFFE5EEE5), RoundedCornerShape(14.dp)),
-                        contentAlignment = Alignment.Center) {
-                        Icon(Icons.Outlined.Chat, null, tint = Moss, modifier = Modifier.size(21.dp))
-                    }
-                    Spacer(Modifier.width(13.dp))
+            Column(Modifier.fillMaxWidth().clickable { onOpen(conversation) }) {
+                Row(Modifier.padding(vertical = 17.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Icon(Icons.Outlined.Chat, null, tint = Moss, modifier = Modifier.size(20.dp))
+                    Spacer(Modifier.width(14.dp))
                     Column(Modifier.weight(1f)) {
                         Text(conversation.title.ifBlank { "未命名对话" }, color = Ink, fontSize = 15.sp,
-                            fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            fontWeight = FontWeight.Medium, maxLines = 1, overflow = TextOverflow.Ellipsis)
                         Spacer(Modifier.height(4.dp))
                         Text(if (conversation.running) "正在回复" else conversation.agentKey,
                             color = if (conversation.running) Moss else Muted, fontSize = 11.sp)
                     }
-                    Icon(Icons.Outlined.ArrowForward, null, tint = Moss, modifier = Modifier.size(18.dp))
+                    Icon(Icons.Outlined.ArrowForward, null, tint = Muted, modifier = Modifier.size(17.dp))
                 }
+                HorizontalDivider(color = Line)
             }
         }
     }
 }
 
 @Composable
-private fun SettingsContent(model: ArtexViewModel) {
+private fun SettingsContent(model: ArtexViewModel, onOpenFullMode: () -> Unit, onOpenArchives: () -> Unit) {
     val picker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
         if (uri != null) model.chooseWallpaper(uri)
     }
-    LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(20.dp),
-        verticalArrangement = Arrangement.spacedBy(15.dp)) {
-        item { SectionHeader("PERSONAL SPACE", "设置", "把工作台调整成喜欢的样子", null) }
+    LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(start = 20.dp, end = 20.dp, top = 21.dp, bottom = 20.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        item { SectionHeader("设置", "外观与连接", null) }
         item {
-            GlassCard(Modifier.fillMaxWidth()) {
-                Column(Modifier.padding(20.dp)) {
+            ContentPanel(Modifier.fillMaxWidth().clickable(onClick = onOpenFullMode)) {
+                Row(Modifier.padding(17.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Column(Modifier.weight(1f)) {
+                        Text("完整功能", color = Ink, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+                        Spacer(Modifier.height(4.dp))
+                        Text("仪表盘、资产、流量及系统管理", color = Muted, fontSize = 12.sp)
+                    }
+                    Icon(Icons.Outlined.ArrowForward, null, tint = Moss, modifier = Modifier.size(18.dp))
+                }
+            }
+        }
+        item {
+            ContentPanel(Modifier.fillMaxWidth().clickable(onClick = onOpenArchives)) {
+                Row(Modifier.padding(17.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Text("任务归档", Modifier.weight(1f), color = Ink, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+                    Icon(Icons.Outlined.ArrowForward, null, tint = Moss, modifier = Modifier.size(18.dp))
+                }
+            }
+        }
+        item {
+            ContentPanel(Modifier.fillMaxWidth()) {
+                Column(Modifier.padding(17.dp)) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Icon(Icons.Outlined.Photo, null, tint = Moss, modifier = Modifier.size(21.dp))
                         Spacer(Modifier.width(9.dp))
@@ -622,7 +690,7 @@ private fun SettingsContent(model: ArtexViewModel) {
                     Spacer(Modifier.height(9.dp))
                     Text("选一张照片作为工作台背景，内容会保持清晰可读。", color = Muted, fontSize = 12.sp, lineHeight = 18.sp)
                     Spacer(Modifier.height(17.dp))
-                    Button(onClick = { picker.launch("image/*") }, shape = RoundedCornerShape(14.dp),
+                    Button(onClick = { picker.launch("image/*") }, shape = RoundedCornerShape(10.dp),
                         colors = ButtonDefaults.buttonColors(containerColor = Ink)) {
                         Icon(Icons.Outlined.Photo, null, Modifier.size(17.dp))
                         Spacer(Modifier.width(7.dp))
@@ -631,8 +699,8 @@ private fun SettingsContent(model: ArtexViewModel) {
                     if (model.wallpaper != null) {
                         Spacer(Modifier.height(14.dp))
                         Text("背景遮罩  ${(model.wallpaperDim * 100).toInt()}%", color = Muted, fontSize = 12.sp)
-                        Slider(value = model.wallpaperDim, onValueChange = model::updateWallpaperDim,
-                            valueRange = 0.25f..0.9f)
+                        Slider(value = model.wallpaperDim.coerceIn(0.65f, 0.95f), onValueChange = model::updateWallpaperDim,
+                            valueRange = 0.65f..0.95f)
                         TextButton(onClick = model::removeWallpaper) {
                             Icon(Icons.Outlined.Delete, null, Modifier.size(16.dp))
                             Spacer(Modifier.width(6.dp))
@@ -643,8 +711,8 @@ private fun SettingsContent(model: ArtexViewModel) {
             }
         }
         item {
-            GlassCard(Modifier.fillMaxWidth()) {
-                Column(Modifier.padding(20.dp)) {
+            ContentPanel(Modifier.fillMaxWidth()) {
+                Column(Modifier.padding(17.dp)) {
                     Text("当前连接", color = Ink, fontSize = 17.sp, fontWeight = FontWeight.SemiBold)
                     Spacer(Modifier.height(9.dp))
                     Text(model.serverAddress, color = Moss, fontSize = 13.sp,
@@ -658,7 +726,7 @@ private fun SettingsContent(model: ArtexViewModel) {
                 }
             }
         }
-        item { Text("ARTEX MOBILE  ·  0.1", color = Muted, fontSize = 10.sp, letterSpacing = 1.2.sp,
+        item { Text("ARTEX Android  ·  0.2", color = Muted, fontSize = 10.sp,
             modifier = Modifier.fillMaxWidth().padding(top = 10.dp), textAlign = androidx.compose.ui.text.style.TextAlign.Center) }
     }
 }
@@ -666,8 +734,10 @@ private fun SettingsContent(model: ArtexViewModel) {
 @Composable
 private fun TaskDetail(
     task: Task, activities: List<Activity>, busy: Boolean, sending: Boolean,
-    onBack: () -> Unit, onRefresh: () -> Unit, onSend: (String, () -> Unit) -> Unit, onStop: () -> Unit,
+    onBack: () -> Unit, onRefresh: () -> Unit, onSend: (String, List<ChatAttachment>, () -> Unit) -> Unit, onStop: () -> Unit,
     onOpenActivity: (Activity) -> Unit,
+    api: ArtexApi, onTaskChanged: () -> Unit, onTaskClosed: () -> Unit,
+    selectedTab: String, onTabChange: (String) -> Unit,
 ) {
     Column(Modifier.fillMaxSize()) {
         DetailTopBar("任务 #${task.id}", onBack, onRefresh)
@@ -680,22 +750,36 @@ private fun TaskDetail(
                 Spacer(Modifier.width(10.dp))
                 Text("${task.findings} 个发现", color = Muted, fontSize = 11.sp)
             }
-            Spacer(Modifier.height(14.dp))
-            Text("主 Agent 对话", color = Ink, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+            Spacer(Modifier.height(10.dp))
+            TaskOperations(task, api, onTaskChanged, onTaskClosed)
+            Spacer(Modifier.height(10.dp))
         }
-        ActivityList(activities, busy, onOpenActivity, Modifier.weight(1f))
-        ChatComposer(sending, onSend, onStop)
+        Row(Modifier.fillMaxWidth().padding(horizontal = 20.dp), horizontalArrangement = Arrangement.spacedBy(22.dp)) {
+            listOf("chat" to "主 Agent 对话", "details" to "任务详情").forEach { (value, label) ->
+                Column(Modifier.clickable { onTabChange(value) }, horizontalAlignment = Alignment.CenterHorizontally) {
+                    Text(label, Modifier.padding(vertical = 10.dp), color = if (selectedTab == value) Ink else Muted,
+                        fontSize = 14.sp, fontWeight = if (selectedTab == value) FontWeight.SemiBold else FontWeight.Normal)
+                    Box(Modifier.fillMaxWidth().height(2.dp).background(if (selectedTab == value) Moss else Color.Transparent))
+                }
+            }
+        }
+        HorizontalDivider(color = Line)
+        if (selectedTab == "chat") {
+            ActivityList(activities, busy, onOpenActivity, Modifier.weight(1f))
+            ChatComposer(api, ChatUploadScope.TASK, task.id, sending, onSend, onStop)
+        } else Box(Modifier.weight(1f)) { TaskDetailExtras(task, api) }
     }
 }
 
 @Composable
 private fun ConversationDetail(
     conversation: Conversation, activities: List<Activity>, busy: Boolean, sending: Boolean,
-    onBack: () -> Unit, onRefresh: () -> Unit, onSend: (String, () -> Unit) -> Unit, onStop: () -> Unit,
+    onBack: () -> Unit, onRefresh: () -> Unit, onSend: (String, List<ChatAttachment>, () -> Unit) -> Unit, onStop: () -> Unit,
     onOpenActivity: (Activity) -> Unit,
+    onManage: () -> Unit, api: ArtexApi,
 ) {
     Column(Modifier.fillMaxSize()) {
-        DetailTopBar("独立对话", onBack, onRefresh)
+        DetailTopBar("独立对话", onBack, onRefresh, onManage)
         Column(Modifier.padding(horizontal = 20.dp, vertical = 8.dp)) {
             Text(conversation.title.ifBlank { "未命名对话" }, color = Ink, fontSize = 24.sp,
                 fontWeight = FontWeight.SemiBold, maxLines = 2)
@@ -703,15 +787,16 @@ private fun ConversationDetail(
             Text(conversation.agentKey, color = Muted, fontSize = 12.sp)
         }
         ActivityList(activities, busy, onOpenActivity, Modifier.weight(1f))
-        ChatComposer(sending, onSend, onStop)
+        ChatComposer(api, ChatUploadScope.SESSION, "conv-${conversation.id}", sending, onSend, onStop)
     }
 }
 
 @Composable
-private fun DetailTopBar(label: String, onBack: () -> Unit, onRefresh: () -> Unit) {
+private fun DetailTopBar(label: String, onBack: () -> Unit, onRefresh: () -> Unit, onManage: (() -> Unit)? = null) {
     Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 11.dp), verticalAlignment = Alignment.CenterVertically) {
         IconButton(onClick = onBack) { Icon(Icons.Outlined.ArrowBack, "返回", tint = Ink) }
         Text(label, Modifier.weight(1f), color = Ink, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+        if (onManage != null) IconButton(onClick = onManage) { Icon(Icons.Outlined.MoreVert, "对话设置", tint = Ink) }
         IconButton(onClick = onRefresh) { Icon(Icons.Outlined.Refresh, "刷新", tint = Moss) }
     }
 }
@@ -719,8 +804,12 @@ private fun DetailTopBar(label: String, onBack: () -> Unit, onRefresh: () -> Uni
 @Composable
 private fun ActivityList(activities: List<Activity>, busy: Boolean, onOpen: (Activity) -> Unit, modifier: Modifier = Modifier) {
     val listState = rememberLazyListState()
+    var previousCount by remember { mutableIntStateOf(0) }
     LaunchedEffect(activities.size) {
-        if (activities.isNotEmpty()) listState.scrollToItem(activities.lastIndex)
+        val lastVisible = listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: -1
+        val follow = previousCount == 0 || lastVisible >= previousCount - 2
+        previousCount = activities.size
+        if (follow && activities.isNotEmpty()) listState.scrollToItem(activities.lastIndex)
     }
     LazyColumn(modifier, state = listState,
         contentPadding = PaddingValues(start = 20.dp, end = 20.dp, top = 10.dp, bottom = 16.dp),
@@ -752,29 +841,68 @@ private fun ActivityList(activities: List<Activity>, busy: Boolean, onOpen: (Act
 }
 
 @Composable
-private fun ChatComposer(sending: Boolean, onSend: (String, () -> Unit) -> Unit, onStop: () -> Unit) {
-    var draft by rememberSaveable { mutableStateOf("") }
+private fun ChatComposer(
+    api: ArtexApi, uploadScope: ChatUploadScope, uploadId: String, sending: Boolean,
+    onSend: (String, List<ChatAttachment>, () -> Unit) -> Unit, onStop: () -> Unit,
+) {
+    val context = LocalContext.current
+    val coroutineScope = rememberCoroutineScope()
+    var draft by rememberSaveable(uploadId) { mutableStateOf("") }
+    var attachments by remember(api, uploadId) { mutableStateOf<List<ChatAttachment>>(emptyList()) }
+    var uploading by remember(api, uploadId) { mutableStateOf(false) }
+    var uploadError by remember(api, uploadId) { mutableStateOf("") }
+    val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
+        if (uris.isNotEmpty()) coroutineScope.launch {
+            uploading = true
+            uploadError = ""
+            try { attachments = attachments + api.uploadChatAttachments(context, uris, uploadScope, uploadId) }
+            catch (e: Exception) { uploadError = e.message ?: "上传附件失败" }
+            finally { uploading = false }
+        }
+    }
     Surface(color = Color.White.copy(alpha = 0.88f), shadowElevation = 8.dp) {
-        Row(Modifier.fillMaxWidth().imePadding().navigationBarsPadding().padding(horizontal = 12.dp, vertical = 10.dp),
-            verticalAlignment = Alignment.Bottom) {
-            IconButton(onClick = onStop, modifier = Modifier.size(44.dp)) {
-                Icon(Icons.Outlined.Stop, "停止执行", tint = Clay)
+        Column(Modifier.fillMaxWidth().imePadding().navigationBarsPadding().padding(horizontal = 12.dp, vertical = 10.dp)) {
+            if (attachments.isNotEmpty()) {
+                Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                    attachments.forEachIndexed { index, attachment ->
+                        TextButton(onClick = { attachments = attachments.filterIndexed { i, _ -> i != index } }) {
+                            Text("${attachment.name} ×", maxLines = 1, color = Moss, fontSize = 11.sp)
+                        }
+                    }
+                }
             }
-            OutlinedTextField(
-                value = draft, onValueChange = { draft = it },
-                placeholder = { Text("发送消息…", fontSize = 13.sp) },
-                modifier = Modifier.weight(1f), shape = RoundedCornerShape(18.dp),
-                maxLines = 4,
-            )
-            Spacer(Modifier.width(7.dp))
-            FilledIconButton(
-                onClick = { val text = draft.trim(); if (text.isNotEmpty()) onSend(text) { draft = "" } },
-                enabled = draft.isNotBlank() && !sending,
-                modifier = Modifier.size(44.dp),
-                colors = IconButtonDefaults.filledIconButtonColors(containerColor = Ink),
-            ) {
-                if (sending) CircularProgressIndicator(Modifier.size(18.dp), color = Color.White, strokeWidth = 2.dp)
-                else Icon(Icons.Outlined.Send, "发送", Modifier.size(19.dp))
+            if (uploadError.isNotBlank()) Text(uploadError, color = Clay, fontSize = 11.sp)
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.Bottom) {
+                IconButton(onClick = onStop, modifier = Modifier.size(44.dp)) {
+                    Icon(Icons.Outlined.Stop, "停止执行", tint = Clay)
+                }
+                IconButton(onClick = { picker.launch(arrayOf("*/*")) }, enabled = !uploading,
+                    modifier = Modifier.size(44.dp)) {
+                    if (uploading) CircularProgressIndicator(Modifier.size(18.dp), color = Moss, strokeWidth = 2.dp)
+                    else Icon(Icons.Outlined.AttachFile, "添加附件", Modifier.size(20.dp), tint = Moss)
+                }
+                OutlinedTextField(
+                    value = draft, onValueChange = { draft = it },
+                    placeholder = { Text("发送消息…", fontSize = 13.sp) },
+                    modifier = Modifier.weight(1f), shape = RoundedCornerShape(18.dp), maxLines = 4,
+                )
+                Spacer(Modifier.width(7.dp))
+                FilledIconButton(
+                    onClick = {
+                        val text = draft.trim()
+                        if (text.isNotEmpty() || attachments.isNotEmpty()) onSend(text, attachments) {
+                            draft = ""
+                            attachments = emptyList()
+                        }
+                    },
+                    enabled = (draft.isNotBlank() || attachments.isNotEmpty()) && !sending && !uploading,
+                    modifier = Modifier.size(44.dp),
+                    colors = IconButtonDefaults.filledIconButtonColors(containerColor = Ink),
+                ) {
+                    if (sending) CircularProgressIndicator(Modifier.size(18.dp), color = Color.White, strokeWidth = 2.dp)
+                    else Icon(Icons.Outlined.Send, "发送", Modifier.size(19.dp))
+                }
             }
         }
     }

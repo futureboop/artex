@@ -47,6 +47,7 @@ Thumbs.db
 
 # native Android client
 /android/.gradle/
+/android/.kotlin/
 /android/**/build/
 /android/local.properties
 
