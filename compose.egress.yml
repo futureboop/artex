@@ -62,6 +62,9 @@ services:
   artex:
     image: ${ARTEX_IMAGE:-autumn27/artex:latest}
     network_mode: service:egress
+    # The base Compose file publishes these ports; the shared egress namespace
+    # uses ingress and egress's own published ports instead.
+    ports: !reset []
     depends_on:
       postgres:
         condition: service_healthy
