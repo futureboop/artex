@@ -117,4 +117,103 @@ class ArtexApiTest {
                 .getJSONObject(0).getString("name"))
         } finally { server.shutdown() }
     }
+
+    @Test
+    fun mainAgentHistoryPreservesSessionAndOlderPageWhileDetailLoadsFullText() = runBlocking {
+        val server = MockWebServer()
+        server.enqueue(MockResponse().setResponseCode(200).setBody(
+            """{"items":[{"seq":51,"kind":"result","worker":"mainagent","summary":"只显示第一行"}],"has_more":true,"earliest_cursor":51,"current_main_seg":2,"main_sessions":[{"seq":2,"created_at":"2026-11-13T01:00:00Z"},{"seq":0,"created_at":""}]}"""
+        ))
+        server.enqueue(MockResponse().setResponseCode(200).setBody(
+            """{"items":[{"seq":12,"kind":"result","worker":"mainagent","summary":"旧会话摘要"}],"has_more":false,"earliest_cursor":12}"""
+        ))
+        server.enqueue(MockResponse().setResponseCode(200).setBody(
+            """{"detail":"第一行\n第二行是完整正文，不能被摘要截掉。"}"""
+        ))
+        server.start()
+        try {
+            val api = ArtexApi(server.url("/").toString(), "test-jwt")
+            val latest = api.taskHistory("56", limit = 60)
+            assertEquals(2, latest.currentMainSeg)
+            assertEquals(listOf(2, 0), latest.mainSessions.map { it.seq })
+            assertEquals(true, latest.hasMore)
+            assertEquals(51L, latest.earliestCursor)
+            assertEquals("只显示第一行", latest.items.single().summary)
+            assertEquals("/api/exploration/activity/history?task=56&session=main&limit=60", server.takeRequest().path)
+
+            val older = api.taskHistory("56", session = "main:0", before = 51, limit = 60)
+            assertEquals("旧会话摘要", older.items.single().summary)
+            assertEquals(false, older.hasMore)
+            assertEquals("/api/exploration/activity/history?task=56&session=main%3A0&limit=60&before=51", server.takeRequest().path)
+
+            assertEquals("第一行\n第二行是完整正文，不能被摘要截掉。", api.taskActivityDetail("56", 51))
+            assertEquals("/api/exploration/activity/51?task=56", server.takeRequest().path)
+        } finally { server.shutdown() }
+    }
+
+    @Test
+    fun mainAgentSessionSwitchUsesItsOwnCursorAndCurrentSessionCanStillRefresh() = runBlocking {
+        val server = MockWebServer()
+        server.enqueue(MockResponse().setBody(
+            """{"items":[{"seq":205,"kind":"result","summary":"当前回复"}],"has_more":true,"earliest_cursor":205,"current_main_seg":3,"main_sessions":[{"seq":3},{"seq":1}]}"""
+        ))
+        server.enqueue(MockResponse().setBody(
+            """{"items":[{"seq":39,"kind":"result","summary":"旧段最新回复"}],"has_more":true,"earliest_cursor":39}"""
+        ))
+        server.enqueue(MockResponse().setBody(
+            """{"items":[{"seq":18,"kind":"user","summary":"旧段更早提问"}],"has_more":false,"earliest_cursor":18}"""
+        ))
+        server.enqueue(MockResponse().setBody(
+            """{"items":[{"seq":206,"kind":"result","summary":"当前新回复"}],"has_more":true,"earliest_cursor":206,"current_main_seg":3,"main_sessions":[{"seq":3},{"seq":1}]}"""
+        ))
+        server.start()
+        try {
+            val api = ArtexApi(server.url("/").toString(), "test-jwt")
+            val current = api.taskHistory("56")
+            assertEquals(3, current.currentMainSeg)
+            assertEquals(listOf(3, 1), current.mainSessions.map { it.seq })
+            assertEquals(205L, current.earliestCursor)
+            assertEquals("/api/exploration/activity/history?task=56&session=main&limit=60", server.takeRequest().path)
+
+            val historical = api.taskHistory("56", session = "main:1")
+            assertEquals(39L, historical.earliestCursor)
+            assertEquals(true, historical.hasMore)
+            assertEquals(null, historical.currentMainSeg)
+            assertEquals("/api/exploration/activity/history?task=56&session=main%3A1&limit=60", server.takeRequest().path)
+
+            val olderHistorical = api.taskHistory("56", session = "main:1", before = historical.earliestCursor)
+            assertEquals(18L, olderHistorical.items.single().seq)
+            assertEquals(false, olderHistorical.hasMore)
+            assertEquals("/api/exploration/activity/history?task=56&session=main%3A1&limit=60&before=39", server.takeRequest().path)
+
+            val refreshedCurrent = api.taskHistory("56")
+            assertEquals(206L, refreshedCurrent.items.single().seq)
+            assertEquals(3, refreshedCurrent.currentMainSeg)
+            assertEquals("/api/exploration/activity/history?task=56&session=main&limit=60", server.takeRequest().path)
+        } finally { server.shutdown() }
+    }
+
+    @Test
+    fun fullMainAgentDetailCanRetryAfterServerErrorWithoutLosingCharacters() = runBlocking {
+        val server = MockWebServer()
+        server.enqueue(MockResponse().setResponseCode(503).setBody("""{"error":"暂时不可用"}"""))
+        server.enqueue(MockResponse().setBody(
+            """{"detail":"第一行完整中文。\n第二行含有 emoji 🧪 和标点，结尾不能少字。"}"""
+        ))
+        server.start()
+        try {
+            val api = ArtexApi(server.url("/").toString(), "test-jwt")
+            val failure = assertThrows(ApiException::class.java) {
+                runBlocking { api.taskActivityDetail("56", 77) }
+            }
+            assertEquals(503, failure.status)
+            assertEquals("/api/exploration/activity/77?task=56", server.takeRequest().path)
+
+            val full = api.taskActivityDetail("56", 77)
+            assertEquals("第一行完整中文。\n第二行含有 emoji 🧪 和标点，结尾不能少字。", full)
+            val retry = server.takeRequest()
+            assertEquals("/api/exploration/activity/77?task=56", retry.path)
+            assertEquals("Bearer test-jwt", retry.getHeader("Authorization"))
+        } finally { server.shutdown() }
+    }
 }

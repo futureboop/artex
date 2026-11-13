@@ -10,6 +10,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
@@ -60,10 +61,12 @@ import io.artex.mobile.data.ChatAttachment
 import io.artex.mobile.data.ChatUploadScope
 import io.artex.mobile.data.Conversation
 import io.artex.mobile.data.Finding
+import io.artex.mobile.data.MainSession
 import io.artex.mobile.data.Task
 import io.artex.mobile.data.uploadChatAttachments
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import org.json.JSONObject
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -99,7 +102,7 @@ fun ArtexApp(model: ArtexViewModel) {
             while (model.signedIn) {
                 delay(if (model.selectedTask != null || model.selectedConversation != null) 6_000 else 20_000)
                 when {
-                    model.selectedTask != null && model.taskDetailTab == "chat" -> model.refreshTaskActivity()
+                    model.selectedTask != null -> if (model.taskDetailTab == "chat") model.refreshTaskActivity()
                     model.selectedConversation != null -> model.refreshConversationActivity()
                     model.tab == HomeTab.TASKS -> model.refreshTasks()
                     model.tab == HomeTab.CONVERSATIONS -> model.refreshConversations()
@@ -133,16 +136,16 @@ fun ArtexApp(model: ArtexViewModel) {
                             model.archivesOpen -> TaskArchivesScreen(model.apiClient()!!, model::goBack, model::refreshTasks)
                             model.selectedTask != null -> TaskDetail(
                                 model.selectedTask!!, model.taskActivity, model.detailBusy, model.sending,
-                                model::closeDetail, model::refreshTaskActivity,
+                                model::closeDetail, { model.refreshTaskActivity(manual = true) },
                                 model::sendTaskMessage, model::stopTaskChat, model::openActivityDetail,
                                 model.apiClient()!!, { model.refreshTasks() }, { model.closeDetail(); model.refreshTasks() },
-                                model.taskDetailTab, model::selectTaskDetailTab,
+                                model.taskDetailTab, model::selectTaskDetailTab, model,
                             )
                             model.selectedConversation != null -> ConversationDetail(
                                 model.selectedConversation!!, model.conversationActivity, model.detailBusy, model.sending,
                                 model::closeDetail, model::refreshConversationActivity,
                                 model::sendConversationMessage, model::stopConversation, model::openActivityDetail,
-                                model::openConversationActions, model.apiClient()!!,
+                                model::openConversationActions, model.apiClient()!!, model,
                             )
                             model.selectedFinding != null -> FindingDetailScreen(
                                 model.selectedFinding!!, model.apiClient()!!, model::closeDetail, { model.refreshFindings() },
@@ -193,12 +196,18 @@ fun ArtexApp(model: ArtexViewModel) {
                     model.selectedTask == null && model.selectedConversation == null && model.selectedFinding == null &&
                     !model.creatingTask && !model.creatingConversation && !model.fullModeOpen && !model.archivesOpen) 92.dp else 18.dp))
             model.activityDetail?.let { detail ->
+                val readable = remember(detail) { renderChatBody(detail) }
                 AlertDialog(
                     onDismissRequest = model::closeActivityDetail,
                     title = { Text("完整内容") },
                     text = {
-                        Column(Modifier.heightIn(max = 500.dp).verticalScroll(rememberScrollState())) {
-                            Text(detail, fontSize = 13.sp, lineHeight = 20.sp)
+                        val chunkSize = 6_000
+                        LazyColumn(Modifier.heightIn(max = 500.dp)) {
+                            items((readable.length + chunkSize - 1) / chunkSize) { index ->
+                                val start = index * chunkSize
+                                Text(readable.substring(start, minOf(start + chunkSize, readable.length)),
+                                    fontSize = 13.sp, lineHeight = 20.sp)
+                            }
                         }
                     },
                     confirmButton = { TextButton(onClick = model::closeActivityDetail) { Text("关闭") } },
@@ -737,7 +746,7 @@ private fun TaskDetail(
     onBack: () -> Unit, onRefresh: () -> Unit, onSend: (String, List<ChatAttachment>, () -> Unit) -> Unit, onStop: () -> Unit,
     onOpenActivity: (Activity) -> Unit,
     api: ArtexApi, onTaskChanged: () -> Unit, onTaskClosed: () -> Unit,
-    selectedTab: String, onTabChange: (String) -> Unit,
+    selectedTab: String, onTabChange: (String) -> Unit, model: ArtexViewModel,
 ) {
     Column(Modifier.fillMaxSize()) {
         DetailTopBar("任务 #${task.id}", onBack, onRefresh)
@@ -754,20 +763,54 @@ private fun TaskDetail(
             TaskOperations(task, api, onTaskChanged, onTaskClosed)
             Spacer(Modifier.height(10.dp))
         }
-        Row(Modifier.fillMaxWidth().padding(horizontal = 20.dp), horizontalArrangement = Arrangement.spacedBy(22.dp)) {
-            listOf("chat" to "主 Agent 对话", "details" to "任务详情").forEach { (value, label) ->
-                Column(Modifier.clickable { onTabChange(value) }, horizontalAlignment = Alignment.CenterHorizontally) {
+        Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+            listOf("chat" to "主对话", "agents" to "Agent 状态", "details" to "任务详情").forEach { (value, label) ->
+                Column(Modifier.weight(1f).clickable { onTabChange(value) }, horizontalAlignment = Alignment.CenterHorizontally) {
                     Text(label, Modifier.padding(vertical = 10.dp), color = if (selectedTab == value) Ink else Muted,
-                        fontSize = 14.sp, fontWeight = if (selectedTab == value) FontWeight.SemiBold else FontWeight.Normal)
+                        fontSize = 13.sp, fontWeight = if (selectedTab == value) FontWeight.SemiBold else FontWeight.Normal)
                     Box(Modifier.fillMaxWidth().height(2.dp).background(if (selectedTab == value) Moss else Color.Transparent))
                 }
             }
         }
         HorizontalDivider(color = Line)
-        if (selectedTab == "chat") {
-            ActivityList(activities, busy, onOpenActivity, Modifier.weight(1f))
-            ChatComposer(api, ChatUploadScope.TASK, task.id, sending, onSend, onStop)
-        } else Box(Modifier.weight(1f)) { TaskDetailExtras(task, api) }
+        when (selectedTab) {
+            "chat" -> {
+                if (model.mainSessions.size > 1) MainSessionSelector(
+                    model.mainSessions, model.selectedMainSeg, model.currentMainSeg, model::selectMainSession)
+                key(model.selectedMainSeg) {
+                    ActivityList(activities, busy, onOpenActivity, model, Modifier.weight(1f),
+                        hasOlder = model.taskHistoryHasMore, loadingOlder = model.taskHistoryLoadingOlder,
+                        onLoadOlder = model::loadOlderTaskActivity)
+                }
+                if (model.selectedMainSeg == model.currentMainSeg) {
+                    ChatComposer(api, ChatUploadScope.TASK, task.id, sending, onSend, onStop)
+                } else {
+                    Surface(color = Color.White.copy(alpha = 0.9f)) {
+                        Row(Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 10.dp),
+                            verticalAlignment = Alignment.CenterVertically) {
+                            Text("旧会话仅供查看", Modifier.weight(1f), color = Muted, fontSize = 12.sp)
+                            TextButton(onClick = { model.selectMainSession(model.currentMainSeg) }) { Text("返回当前会话") }
+                        }
+                    }
+                }
+            }
+            "agents" -> Box(Modifier.weight(1f)) { TaskAgentsScreen(task, api) }
+            else -> Box(Modifier.weight(1f)) { TaskDetailExtras(task, api) }
+        }
+    }
+}
+
+@Composable
+private fun MainSessionSelector(
+    sessions: List<MainSession>, selected: Int, current: Int, onSelect: (Int) -> Unit,
+) {
+    LazyRow(contentPadding = PaddingValues(horizontal = 17.dp, vertical = 6.dp),
+        horizontalArrangement = Arrangement.spacedBy(7.dp)) {
+        items(sessions, key = { it.seq }) { session ->
+            val label = if (session.seq == current) "当前会话" else if (session.seq == 0) "初始会话" else "会话 ${session.seq}"
+            FilterChip(selected = session.seq == selected, onClick = { onSelect(session.seq) },
+                label = { Text(label, fontSize = 11.sp) })
+        }
     }
 }
 
@@ -776,7 +819,7 @@ private fun ConversationDetail(
     conversation: Conversation, activities: List<Activity>, busy: Boolean, sending: Boolean,
     onBack: () -> Unit, onRefresh: () -> Unit, onSend: (String, List<ChatAttachment>, () -> Unit) -> Unit, onStop: () -> Unit,
     onOpenActivity: (Activity) -> Unit,
-    onManage: () -> Unit, api: ArtexApi,
+    onManage: () -> Unit, api: ArtexApi, model: ArtexViewModel,
 ) {
     Column(Modifier.fillMaxSize()) {
         DetailTopBar("独立对话", onBack, onRefresh, onManage)
@@ -786,7 +829,7 @@ private fun ConversationDetail(
             Spacer(Modifier.height(4.dp))
             Text(conversation.agentKey, color = Muted, fontSize = 12.sp)
         }
-        ActivityList(activities, busy, onOpenActivity, Modifier.weight(1f))
+        ActivityList(activities, busy, onOpenActivity, model, Modifier.weight(1f))
         ChatComposer(api, ChatUploadScope.SESSION, "conv-${conversation.id}", sending, onSend, onStop)
     }
 }
@@ -801,23 +844,53 @@ private fun DetailTopBar(label: String, onBack: () -> Unit, onRefresh: () -> Uni
     }
 }
 
+/** The history endpoint intentionally returns short summaries; visible turns fetch their full detail. */
 @Composable
-private fun ActivityList(activities: List<Activity>, busy: Boolean, onOpen: (Activity) -> Unit, modifier: Modifier = Modifier) {
+private fun ActivityList(
+    activities: List<Activity>, busy: Boolean, onOpen: (Activity) -> Unit,
+    model: ArtexViewModel, modifier: Modifier = Modifier,
+    hasOlder: Boolean = false, loadingOlder: Boolean = false, onLoadOlder: (() -> Unit)? = null,
+) {
+    val displayActivities = remember(activities) { activities.filter { it.kind != "usage" } }
     val listState = rememberLazyListState()
-    var previousCount by remember { mutableIntStateOf(0) }
-    LaunchedEffect(activities.size) {
+    var previousFirst by remember { mutableLongStateOf(0L) }
+    var previousLast by remember { mutableLongStateOf(0L) }
+    LaunchedEffect(displayActivities.firstOrNull()?.seq, displayActivities.lastOrNull()?.seq, displayActivities.size) {
+        val first = displayActivities.firstOrNull()?.seq ?: 0L
+        val last = displayActivities.lastOrNull()?.seq ?: 0L
+        val initial = previousLast == 0L
+        val prepended = previousFirst != 0L && first < previousFirst && last == previousLast
         val lastVisible = listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: -1
-        val follow = previousCount == 0 || lastVisible >= previousCount - 2
-        previousCount = activities.size
-        if (follow && activities.isNotEmpty()) listState.scrollToItem(activities.lastIndex)
+        val nearEnd = lastVisible >= listState.layoutInfo.totalItemsCount - 3
+        previousFirst = first
+        previousLast = last
+        if (displayActivities.isNotEmpty() && !prepended && (initial || (last > 0 && nearEnd))) {
+            listState.scrollToItem(displayActivities.lastIndex + if (hasOlder || loadingOlder) 1 else 0)
+        }
     }
     LazyColumn(modifier, state = listState,
         contentPadding = PaddingValues(start = 20.dp, end = 20.dp, top = 10.dp, bottom = 16.dp),
         verticalArrangement = Arrangement.spacedBy(10.dp)) {
-        if (busy && activities.isEmpty()) item { LoadingRow() }
-        if (!busy && activities.isEmpty()) item { EmptyMessage("暂无消息") }
-        items(activities, key = { it.seq }) { activity ->
+        if (hasOlder || loadingOlder) item(key = "older") {
+            TextButton(onClick = { onLoadOlder?.invoke() }, enabled = hasOlder && !loadingOlder,
+                modifier = Modifier.fillMaxWidth()) {
+                if (loadingOlder) CircularProgressIndicator(Modifier.size(15.dp), color = Moss, strokeWidth = 2.dp)
+                else Text("加载更早记录")
+            }
+        }
+        if (busy && displayActivities.isEmpty()) item { LoadingRow() }
+        if (!busy && displayActivities.isEmpty() && !hasOlder) item { EmptyMessage("暂无消息") }
+        items(displayActivities, key = { it.seq }) { activity ->
+            val rowScope = rememberCoroutineScope()
             val fromUser = activity.kind == "user"
+            val full = model.inlineActivityText(activity)
+            val needsFull = activity.kind in setOf("user", "result", "text", "thinking", "tool_use", "tool_result") &&
+                activity.seq > 0
+            val fullError = model.inlineActivityError(activity.seq)
+            LaunchedEffect(activity.seq, model) {
+                if (needsFull && full == null) model.loadInlineActivityDetail(activity)
+            }
+            val shown = if (fromUser) renderChatBody(full ?: activity.summary) else full ?: activity.summary
             Row(Modifier.fillMaxWidth(), horizontalArrangement = if (fromUser) Arrangement.End else Arrangement.Start) {
                 Surface(
                     modifier = Modifier.fillMaxWidth(if (fromUser) 0.86f else 0.94f).clickable { onOpen(activity) },
@@ -830,12 +903,44 @@ private fun ActivityList(activities: List<Activity>, busy: Boolean, onOpen: (Act
                             color = if (fromUser) Color(0xFFBFD4C5) else Moss,
                             fontSize = 10.sp, fontWeight = FontWeight.Bold)
                         Spacer(Modifier.height(6.dp))
-                        Text(activity.summary.ifBlank { "（无摘要）" },
+                        Text((if (shown.length > 3_000) shown.take(3_000) + "…" else shown).ifBlank { "（无内容）" },
                             color = if (fromUser) Color.White else Ink,
                             fontSize = 13.sp, lineHeight = 20.sp)
+                        if (shown.length > 3_000) {
+                            Spacer(Modifier.height(7.dp))
+                            Text("正文较长 · 点按阅读全文", color = if (fromUser) Color(0xFFBFD4C5) else Moss,
+                                fontSize = 11.sp)
+                        }
+                        if (needsFull && full == null) {
+                            Spacer(Modifier.height(7.dp))
+                            TextButton(onClick = { rowScope.launch { model.loadInlineActivityDetail(activity) } },
+                                contentPadding = PaddingValues(0.dp)) {
+                                Text(if (fullError) "全文读取失败 · 点击重试" else "正在读取全文…",
+                                    color = if (fromUser) Color(0xFFBFD4C5) else Moss, fontSize = 11.sp)
+                            }
+                        } else if (!needsFull) {
+                            Spacer(Modifier.height(7.dp))
+                            Text("点按查看完整记录", color = if (fromUser) Color(0xFFBFD4C5) else Muted,
+                                fontSize = 10.sp)
+                        }
                     }
                 }
             }
+        }
+    }
+}
+
+private fun renderChatBody(raw: String): String {
+    val obj = runCatching { JSONObject(raw) }.getOrNull() ?: return raw
+    val attachments = obj.optJSONArray("attachments") ?: return raw
+    if (!obj.has("text")) return raw
+    val names = (0 until attachments.length()).mapNotNull { attachments.optJSONObject(it)?.optString("name") }
+        .filter { it.isNotBlank() }
+    return buildString {
+        append(obj.optString("text"))
+        if (names.isNotEmpty()) {
+            if (isNotEmpty()) append("\n")
+            append(names.joinToString("\n") { "附件：$it" })
         }
     }
 }

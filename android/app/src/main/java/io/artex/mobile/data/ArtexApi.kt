@@ -1,17 +1,23 @@
 package io.artex.mobile.data
 
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
+import okhttp3.Call
+import okhttp3.Callback
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
+import okhttp3.Response
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.IOException
 import java.net.URI
 import java.net.URLEncoder
 import java.util.concurrent.TimeUnit
+import kotlin.coroutines.resume
+import kotlin.coroutines.resumeWithException
 
 data class Task(
     val id: String,
@@ -50,6 +56,17 @@ data class Activity(
     val ts: String,
     val worker: String,
     val isError: Boolean,
+    val detail: String = "",
+)
+
+data class MainSession(val seq: Int, val createdAt: String)
+
+data class TaskHistoryPage(
+    val items: List<Activity>,
+    val hasMore: Boolean,
+    val earliestCursor: Long,
+    val mainSessions: List<MainSession>,
+    val currentMainSeg: Int?,
 )
 
 class ApiException(val status: Int, message: String) : IOException(message)
@@ -127,21 +144,72 @@ class ArtexApi(baseUrl: String, @Volatile var token: String? = null) {
             )
         }
 
-    /** Latest main-agent session page. Older pages use the API's `before` cursor. */
-    suspend fun taskHistory(taskId: String, limit: Int = 80): List<Activity> {
-        val path = "/api/exploration/activity/history?task=${encode(taskId)}&session=main&limit=${limit.coerceIn(1, 500)}"
-        return request("GET", path).optJSONArray("items").toActivities()
+    /** One reverse-paginated main-agent segment; bare `main` selects the current segment. */
+    suspend fun taskHistory(
+        taskId: String, session: String = "main", before: Long = 0, limit: Int = 60,
+    ): TaskHistoryPage {
+        require(session == "main" || Regex("main:[0-9]+").matches(session)) { "主会话标识无效" }
+        val path = "/api/exploration/activity/history?task=${encode(taskId)}&session=${encode(session)}" +
+            "&limit=${limit.coerceIn(1, 500)}" + (if (before > 0) "&before=$before" else "")
+        val response = request("GET", path)
+        val items = response.optJSONArray("items").toActivities()
+        return TaskHistoryPage(
+            items = items,
+            hasMore = response.optBoolean("has_more"),
+            earliestCursor = response.optLong("earliest_cursor", items.firstOrNull()?.seq ?: 0),
+            mainSessions = response.optJSONArray("main_sessions").toObjects().map { obj ->
+                MainSession(obj.optInt("seq"), obj.optString("created_at"))
+            },
+            currentMainSeg = if (response.has("current_main_seg")) response.optInt("current_main_seg") else null,
+        )
     }
 
     suspend fun taskActivityDetail(taskId: String, seq: Long): String =
-        request("GET", "/api/exploration/activity/$seq?task=${encode(taskId)}").optString("detail")
+        requestActivityDetail("/api/exploration/activity/$seq?task=${encode(taskId)}")
 
     suspend fun conversationMessages(id: Long, limit: Int = 80): List<Activity> =
         request("GET", "/api/conversations/$id/messages?limit=${limit.coerceIn(1, 1000)}")
             .optJSONArray("items").toActivities()
 
     suspend fun conversationActivityDetail(id: Long, seq: Long): String =
-        request("GET", "/api/conversations/$id/messages/$seq").optString("detail")
+        requestActivityDetail("/api/conversations/$id/messages/$seq")
+
+    /** Scrolling away from a row cancels its network call, including while the body is being read. */
+    private suspend fun requestActivityDetail(path: String): String = suspendCancellableCoroutine { continuation ->
+        val currentToken = token?.takeIf { it.isNotBlank() }
+        if (currentToken == null) {
+            continuation.resumeWithException(ApiException(401, "请先登录"))
+            return@suspendCancellableCoroutine
+        }
+        val request = Request.Builder().url(baseUrl + path)
+            .header("Accept", "application/json")
+            .header("Cache-Control", "no-store")
+            .header("Authorization", "Bearer $currentToken")
+            .get().build()
+        val call = http.newBuilder().readTimeout(60, TimeUnit.SECONDS).build().newCall(request)
+        continuation.invokeOnCancellation { call.cancel() }
+        call.enqueue(object : Callback {
+            override fun onFailure(call: Call, e: IOException) {
+                if (continuation.isActive) continuation.resumeWithException(e)
+            }
+
+            override fun onResponse(call: Call, response: Response) {
+                try {
+                    val detail = response.use {
+                        val body = it.body?.string().orEmpty()
+                        if (!it.isSuccessful) {
+                            val error = runCatching { JSONObject(body).optString("error") }.getOrNull()
+                            throw ApiException(it.code, error?.takeIf(String::isNotBlank) ?: "服务器返回 ${it.code}")
+                        }
+                        JSONObject(body).optString("detail")
+                    }
+                    if (continuation.isActive) continuation.resume(detail)
+                } catch (e: Exception) {
+                    if (continuation.isActive) continuation.resumeWithException(e)
+                }
+            }
+        })
+    }
 
     suspend fun sendTaskMessage(taskId: String, message: String, attachments: List<ChatAttachment> = emptyList()) {
         val body = JSONObject().put("message", message)
@@ -225,6 +293,7 @@ class ArtexApi(baseUrl: String, @Volatile var token: String? = null) {
             ts = obj.optString("ts"),
             worker = obj.optString("worker"),
             isError = obj.optBoolean("is_error"),
+            detail = obj.optString("detail"),
         )
     }
 
